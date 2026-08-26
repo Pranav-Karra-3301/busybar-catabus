@@ -1821,6 +1821,8 @@ class PreviewBar:
         name = "preview"
         ws_uri = None
 
+    scale = 8  # site/capture tooling sets 1 for raw 72x16 frames
+
     def __init__(self, outdir="preview"):
         self.t = self._T()
         self.outdir = outdir
@@ -2007,7 +2009,7 @@ class PreviewBar:
                         tx, ty = el.get("x", 0) + gx, el.get("y", 0) + gy
                         if 0 <= tx < 72 and 0 <= ty < 16:
                             grid[ty][tx] = color
-        scale = 8
+        scale = self.scale
         big = [[(*grid[y // scale][x // scale], 255)
                 for x in range(72 * scale)] for y in range(16 * scale)]
         blob = png_encode(72 * scale, 16 * scale, big)
