@@ -1367,7 +1367,7 @@ def make_bullet(desig):
     busy-mode plates: 1px specular top, vertical ramp, lifted bottom
     edge, radius-4 corners."""
     pal = palette_for(desig)
-    w, h, r = BULLET_W, BULLET_H, 4
+    w, h, r = BULLET_W, BULLET_H, 3
     px = [[(0, 0, 0, 0)] * w for _ in range(h)]
     for y in range(h):
         if y == 0:
@@ -1587,7 +1587,7 @@ def _plate_ramp(hexc):
 
 
 WORD_INK_TOP = 2    # status word ink rows 2-8; marquee inks 10-13 below it
-WORD_X = 19         # left-aligned after the bullet slot, firmware style
+WORD_X = 25         # left-aligned after the 22px route-plate slot
 
 
 def _plate_pixels(hexc, hazard=False):
@@ -1772,6 +1772,7 @@ def build_status_assets():
             ("susp", make_status_screen("#7E1416", "NO BUSES",
                                         font="condensed")),
             ("planned", make_status_screen("#FCC30B", "PLANNED",
+                                           font="condensed",
                                            motion="crawl", hazard=True)),
             ("delayed", make_status_screen("#7E1416", "DELAYED")),
             ("alertpg", make_status_screen("#7E1416", "ALERT")),
@@ -2578,7 +2579,7 @@ def build_screen(cfg, assets, arrivals, index, offset=0, alert_dot=False):
         # a live service alert exists: quiet amber corner dot on the
         # bullet; the full story plays as the periodic alert page
         els.append({
-            "id": "adot", "type": "rectangle", "x": 12, "y": 0 + offset,
+            "id": "adot", "type": "rectangle", "x": 18, "y": 1 + offset,
             "width": 3, "height": 3, "fill": "solid",
             "fill_colors": [AMBER], "border_width": 0,
             "timeout": ELEMENT_TIMEOUT,
