@@ -44,11 +44,14 @@ APP = ROOT / "apps" / "catabus" / "app.py"
 DATA = ROOT / "tools" / "data"
 LEGACY = Path.home() / "busybar" / "app"
 
-CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+CHARS = ("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+         "abcdefghijklmnopqrstuvwxyz")
 
 # hand-tuned flash letters (dumped off the device screen, user-tuned;
 # from ~/busybar/tools/build_trains_art.py XL_GLYPHS) — always win
 XL_OVERRIDES = {
+    "V": ["##....##", "##....##", "##....##", ".##..##.", ".##..##.",
+          ".##..##.", "..####..", "..####..", "...##...", "...##..."],
     "N": ["##...##", "##...##", "###..##", "####.##", "#######",
           "##.####", "##..###", "##...##", "##...##", "##...##"],
     "Q": [".#####.", "#######", "##...##", "##...##", "##...##",
@@ -145,7 +148,7 @@ def font_glyphs(font_path: Path) -> dict[str, list[str]]:
         if adv_fmt == 1:
             adv = round(adv / 16)
         _x = br.read_signed(xy_bits)
-        _y = br.read_signed(xy_bits)
+        ofs_y = br.read_signed(xy_bits)  # bbox bottom, from the baseline
         w = br.read(wh_bits)
         h = br.read(wh_bits)
         if not (0 < w <= 16 and 0 < h <= 16):
@@ -158,16 +161,28 @@ def font_glyphs(font_path: Path) -> dict[str, list[str]]:
                 v = br.read(bpp) if bpp > 1 else br.read(1)
                 row += "#" if v >= max(on_threshold, 1) else "."
             rows.append(row)
-        out[ch] = rows
-    return out
+        out[ch] = (rows, ofs_y)
+
+    # pad tops to the font's cap line (ascent from digits+caps) so glyphs
+    # of any case align by their row 0
+    ascent = max((y + len(r) for c, (r, y) in out.items()
+                  if c.isupper() or c.isdigit()), default=0)
+    padded = {}
+    for ch, (rows, y) in out.items():
+        pad = ascent - (y + len(rows))
+        w = len(rows[0]) if rows else 0
+        padded[ch] = ["." * w] * max(pad, 0) + rows
+    return padded
 
 
 def trim(rows: list[str]) -> list[str]:
-    """Crop to the ink bounding box (fonts may pad the bbox)."""
+    """Crop columns to the ink box and drop rows below the last ink; rows
+    ABOVE the first ink survive — they encode the baseline (row 0 is the
+    font's cap line, so lowercase starts lower and descenders run longer)."""
     ys = [i for i, r in enumerate(rows) if "#" in r]
     if not ys:
         return rows
-    rows = rows[ys[0]:ys[-1] + 1]
+    rows = rows[:ys[-1] + 1]
     xs = [i for r in rows for i, c in enumerate(r) if c == "#"]
     x0, x1 = min(xs), max(xs)
     return [r[x0:x1 + 1] for r in rows]

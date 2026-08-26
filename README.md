@@ -11,8 +11,9 @@ lower Vairo Village (stop 506). Any routes/stops work via env.
 
 ## What it shows
 
-- **Next bus**: route bullet (shaded disk, letters from the Bar's own
-  fonts), minutes in extra-large type, position dots for up to 8 upcoming
+- **Next bus**: route plate (22x15 shaded rounded rectangle — CATA's
+  two-letter routes need more room than a subway-style disk — letters
+  from the Bar's own fonts), minutes in extra-large type, position dots for up to 8 upcoming
   buses. Dial scrolls through them (over USB or a forwarded status socket).
 - **Departure flash**: full-screen sweep in the route color when the shown
   bus leaves, compiled as a device-side 60fps `.anim`.
@@ -86,7 +87,7 @@ tailnet so the dial works when the app runs on a server (`BUSYBAR_WS`).
 Everything below works in `--preview`; confirm on the device when it's
 back in reach:
 
-- [ ] V / VE / NV bullet legibility at LED scale; tune letters with
+- [ ] V / VE / NV route-plate legibility at LED scale; tune letters with
       `tools/bullet_editor.py` (arrow keys, sizes, Save bakes offsets)
 - [ ] departure flash `.anim` plays smoothly and ends black
 - [ ] status plates + amber wash page cycle; marquee pass timing
