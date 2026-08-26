@@ -1,0 +1,8 @@
+name: CATA Bus
+author: Pranav-Karra-3301
+description: Live CATA bus departures (State College, PA) — campus-bound V/VE at Vairo Blvd by default, any stop via env. Route bullets, minutes to bus, departure flash, delay/detour/no-service plates, last-bus and next-service awareness. GTFS + GTFS-realtime, no API key.
+tags:
+  - transit
+  - info
+  - time
+repo: https://github.com/Pranav-Karra-3301/busybar-catabus

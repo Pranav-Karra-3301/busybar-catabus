@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+apps/catabus/gtfs_cache.zip
+apps/catabus/preview/
+preview/

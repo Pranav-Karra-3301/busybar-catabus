@@ -1,0 +1,25 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest requests websockets
+      - run: python -m pytest tests/ -q
+      - name: app.py compiles and --help stays stdlib-only
+        run: |
+          python -m py_compile apps/catabus/app.py
+          python apps/catabus/app.py --help > /dev/null
+      - name: glyph codegen round-trips byte-identically
+        run: |
+          cp apps/catabus/app.py /tmp/before.py
+          python tools/build_glyphs.py --write
+          cmp /tmp/before.py apps/catabus/app.py
