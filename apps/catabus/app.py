@@ -2638,9 +2638,11 @@ def build_screen(cfg, assets, arrivals, index, offset=0, alert_dot=False,
     `late_secs` > 0 means the shown trip is held or running late: the board
     stays exactly the same — the ETA is the number that matters and the
     dial keeps scrolling — but the shaded red `late_plate` slides in under
-    the minutes (text stays WHITE over it) and a small "+N" (minutes late)
-    takes the tag slot. The element-id set is identical either way, so
-    late<->on-time flips never need a canvas clear."""
+    the minutes (text stays WHITE over it) and the "min" unit becomes
+    "+N" (minutes late) at the same bold size: the red field already says
+    these are minutes, and tiny type was unreadable from the couch. The
+    element-id set is identical either way, so late<->on-time flips never
+    need a canvas clear."""
     els = []
     if not arrivals:
         routes_label = "/".join(
@@ -2703,7 +2705,8 @@ def build_screen(cfg, assets, arrivals, index, offset=0, alert_dot=False,
             "x": 41, "y": 8 + offset, "timeout": ELEMENT_TIMEOUT,
         })
         els.append({
-            "id": "unit", "type": "text", "text": "min",
+            "id": "unit", "type": "text",
+            "text": f"+{late}" if late else "min",
             "font": "bold", "color": WHITE, "align": "bottom_left",
             "x": 44, "y": 15 + offset, "timeout": ELEMENT_TIMEOUT,
         })
@@ -2711,18 +2714,11 @@ def build_screen(cfg, assets, arrivals, index, offset=0, alert_dot=False,
     # minutes; parked (same type) otherwise — the firmware 400s a type
     # change on an existing id. Skipped in the NOW case, where the big
     # centered NOW owns that region (the departure flash follows anyway).
-    # A late bus's "+N" outranks LAST for the slot.
     els.append({
         "id": "last", "type": "text", "text": "LAST",
         "font": "tiny", "color": AMBER, "align": "top_left",
         "x": 44,
-        "y": (0 + offset) if (is_last and mins > 0 and not late) else -30,
-        "timeout": ELEMENT_TIMEOUT,
-    })
-    els.append({
-        "id": "late", "type": "text", "text": f"+{late}",
-        "font": "tiny", "color": WHITE, "align": "top_left",
-        "x": 44, "y": (0 + offset) if (late and mins > 0) else -30,
+        "y": (0 + offset) if (is_last and mins > 0) else -30,
         "timeout": ELEMENT_TIMEOUT,
     })
     # position dots, two 1px columns down the right edge: the right column
@@ -3032,9 +3028,13 @@ class App:
         if a:
             return ("alertpg", a["head"].upper(), WHITE)
         a = self._alert("suspension")
-        if a:  # partial suspension while trains still run here
+        if a:
+            # a suspension-kind alert while buses ARE running (this page
+            # only fires with arrivals on the board): the big NO BUSES
+            # plate would lie — fly the ALERT plate with the headline.
+            # The real NO BUSES takeover stays reserved for an empty board.
             mq = a["head"] + ("   " + a["period"] if a["period"] else "")
-            return ("susp", mq.upper(), "#FFD2CCFF")
+            return ("alertpg", mq.upper(), "#FFD2CCFF")
         a = self._alert("detour")
         if a:
             mq = a["head"] + ("   " + a["period"] if a["period"] else "")

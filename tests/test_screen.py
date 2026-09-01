@@ -1,9 +1,9 @@
 """Board-rendering tests for the held/late treatment and the walk filter.
 A delayed bus keeps the normal board — text stays WHITE, the shaded red
-late-glow plate slides in under the minutes, a small "+N" takes the tag
-slot — and the element-id set is identical either way so late<->on-time
-flips never force a canvas clear. The walk filter hides buses that depart
-sooner than the walk to their stop."""
+late-glow plate slides in under the minutes, and the "min" unit becomes a
+bold "+N" (minutes late) — and the element-id set is identical either way
+so late<->on-time flips never force a canvas clear. The walk filter hides
+buses that depart sooner than the walk to their stop."""
 
 import sys
 import time
@@ -33,18 +33,19 @@ def board(late_secs=0, mins=5, is_last=False):
 def test_on_time_board_white_glow_parked():
     els = board()
     assert els["num"]["color"] == app.WHITE
+    assert els["unit"]["text"] == "min"
     assert els["unit"]["color"] == app.WHITE
     assert els["lateglow"]["y"] < 0
-    assert els["late"]["y"] < 0
 
 
-def test_late_board_glow_in_text_still_white():
+def test_late_board_glow_in_unit_becomes_plus_n():
     els = board(late_secs=6 * 60)
-    assert els["num"]["color"] == app.WHITE
-    assert els["unit"]["color"] == app.WHITE
+    assert els["num"]["color"] == app.WHITE      # ETA stays the hero
     assert els["lateglow"]["y"] == 0
-    assert els["late"]["text"] == "+6"
-    assert els["late"]["y"] == 0
+    assert els["unit"]["text"] == "+6"           # readable bold, not tiny
+    assert els["unit"]["font"] == "bold"
+    assert els["unit"]["color"] == app.WHITE
+    assert els["unit"]["y"] == 15                # same slot "min" lives in
 
 
 def test_glow_sits_under_everything():
@@ -53,20 +54,17 @@ def test_glow_sits_under_everything():
     assert ids[0] == "lateglow"  # first created = lowest z on the device
 
 
-def test_late_outranks_last_for_the_tag_slot():
+def test_last_tag_coexists_with_lateness():
     els = board(late_secs=5 * 60, is_last=True)
-    assert els["late"]["y"] == 0
-    assert els["last"]["y"] < 0
-    els = board(is_last=True)
     assert els["last"]["y"] == 0
-    assert els["late"]["y"] < 0
+    assert els["unit"]["text"] == "+5"
 
 
-def test_now_case_keeps_glow_skips_tag():
+def test_now_case_keeps_glow_parks_unit():
     els = board(late_secs=4 * 60, mins=0)
     assert els["num"]["text"] == "NOW"
     assert els["lateglow"]["y"] == 0
-    assert els["late"]["y"] < 0
+    assert els["unit"]["y"] < 0
 
 
 def test_element_id_set_identical_late_or_not():
@@ -76,6 +74,18 @@ def test_element_id_set_identical_late_or_not():
 def test_no_glow_element_without_status_assets():
     els = by_id(app.build_screen({}, ASSETS, arrivals(), 0))
     assert "lateglow" not in els
+
+
+def test_pick_page_never_says_no_buses_while_running():
+    # a suspension-kind alert with buses on the board pages as ALERT,
+    # not as the NO BUSES plate (that takeover is for an empty board)
+    a = app.App.__new__(app.App)
+    a.alerts = [{"kind": "suspension", "type": "suspension",
+                 "head": "Construction on Pike St", "period": "",
+                 "routes": ["V"]}]
+    key, marquee, _color = a._pick_page()
+    assert key == "alertpg"
+    assert "CONSTRUCTION" in marquee
 
 
 def test_parse_walk():
