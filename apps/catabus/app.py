@@ -3016,7 +3016,8 @@ class App:
     async def alerts_poller(self):
         while True:
             try:
-                alerts = await asyncio.to_thread(fetch_alerts, self.cfg)
+                alerts = await asyncio.to_thread(
+                    fetch_alerts, {"groups": self.groups})
                 if ([a["type"] for a in alerts]
                         != [a["type"] for a in self.alerts]):
                     kinds = ", ".join(a["type"] for a in alerts) or "clear"
