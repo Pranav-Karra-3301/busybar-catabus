@@ -72,6 +72,12 @@ Usage:
     python app.py --preview [--demo...]  # no Bar needed: render every
                                          # screen to PNGs in ./preview/
 
+Buttons (while this app owns the screen the firmware swallows OK/START —
+they are ours; BACK and slider moves always tear the canvas down, and the
+app redraws immediately when it sees them): OK = show the service-alert
+page on demand; START = snap to the soonest bus and park the auto-tour
+for a minute.
+
 Dial: over USB the Bar's dial scrolls through upcoming arrivals (needs the
 optional `websockets` package); other transports show the next bus unless
 BUSYBAR_WS points them at a forwarded copy of the USB status socket.
@@ -124,6 +130,13 @@ try:
     ROTATE_DEPTH = max(2, int(os.environ.get("ROTATE_DEPTH", "3")))
 except ValueError:
     ROTATE_DEPTH = 3     # rotate among the first N catchable buses
+START_HOLD_SECS = 60     # START snaps home and holds the tour this long
+HELD_TTL_SECS = 90       # keep held state through a VehiclePositions blip
+ALERTS_TTL_POLLS = 3     # drop alerts after this many failed polls
+# BSB_Input enums (busybar-protobuf input.proto; PRESS/RELEASE only — the
+# firmware's short/long/repeat never reach the wire)
+BTN_OK, BTN_BACK, BTN_START = 0, 1, 2
+ACT_PRESS, ACT_RELEASE = 0, 1
 ELEMENT_TIMEOUT = 90     # stale elements self-erase if we stop pushing
 MAX_ARRIVALS = 8         # 8 position dots x 2px = the 16px display height
 FRAME_SECS = 0.04        # target animation frame interval (local transports)
@@ -1168,6 +1181,9 @@ def parse_direction(value):
 def _make_group(schedule, routes_csv, stops_csv, direction, which):
     dir_id, dir_word = parse_direction(direction)
     shorts = [r.strip().upper() for r in routes_csv.split(",") if r.strip()]
+    if not shorts:
+        raise ConfigError(f"{which} ROUTES is empty ({routes_csv!r})",
+                          f"check {which} ROUTES")
     route_ids = []
     for s in shorts:
         rid = schedule.short_to_id.get(s)
@@ -1291,7 +1307,11 @@ def _scale(c, k):
 
 
 def palette_for(desig):
-    hexc, key = DESIGNATOR_META[base_desig(desig)]
+    # routes beyond the hand-tuned three (V/VE/NV) still deserve plates:
+    # fall back to the feed's own route color (or neutral gray) instead of
+    # crashing the app at startup on a KeyError
+    hexc, key = (DESIGNATOR_META.get(base_desig(desig))
+                 or (line_color(desig), None))
     if key:
         return PALETTES[key]
     base = _hex_rgb(hexc)
@@ -1337,8 +1357,11 @@ SIZE_TABLES = {"tiny": TINY_GLYPHS, "small": SMALL_GLYPHS,
 
 def _combine_glyphs(text, table, gap=1):
     """Stamp several glyphs side by side into one glyph grid — CATA route
-    designators run to two letters (VE, NV), unlike subway bullets."""
-    glyphs = [table[c] for c in text]
+    designators run to two letters (VE, NV), unlike subway bullets.
+    Characters the tables don't carry render as a blank cell rather than
+    KeyError-ing the whole app."""
+    blank = ["..." for _ in next(iter(table.values()))]
+    glyphs = [table.get(c, blank) for c in text]
     h = max(len(g) for g in glyphs)
     rows = []
     for y in range(h):
@@ -2160,8 +2183,8 @@ class PreviewBar:
             x0, y0 = x, y - gh + 1
         else:  # top_left — the firmware's ~2-row label leading, measured
             x0, y0 = x, y + 2
-        clip_lo = x if "width" in el else None
-        clip_hi = x + el["width"] if "width" in el else None
+        clip_lo = x0 if "width" in el else None
+        clip_hi = x0 + el["width"] if "width" in el else None
         cx = x0
         for ch in text:
             if ch == " ":
@@ -2332,7 +2355,8 @@ def decode_trip_updates(buf, stops, want_desigs):
 def decode_status(buf, stops):
     """Status pass over the VehiclePositions feed: held buses and (bonus)
     occupancy. Held = STOPPED_AT whose position timestamp lags the FEED's
-    own header timestamp — comparing two feed clocks (not wall clock)
+    own header timestamp — vehicle ts vs the FEED's clock (the local
+    clock only gates snapshot freshness)
     means a stale snapshot can't mark the whole fleet as held; if the
     feed itself is stale we skip held detection entirely. Returns
     (held {trip_id: (secs, stop_id)}, occupancy {trip_id: enum})."""
@@ -2392,7 +2416,7 @@ def fetch_arrivals(group, schedule):
     stops = set(group["stops"])
     want = set(group["designators"])
     per_trip = {}
-    held, occupancy = {}, {}
+    held, occupancy = None, {}
     try:
         r = requests.get(rt_url("TripUpdates"), timeout=15)
         r.raise_for_status()
@@ -2418,6 +2442,8 @@ def fetch_arrivals(group, schedule):
                   f"{e}", file=sys.stderr)
 
     sched_floor = now + (SCHED_MERGE_MIN * 60 if per_trip else 0)
+    admitted_prev = group.setdefault("_admitted", set())
+    admitted = set()
     last_marks = set()
     # cap at 99 minutes: a third digit would collide with the route plate,
     # and past that the quiet next-service plate is the better answer
@@ -2425,13 +2451,21 @@ def fetch_arrivals(group, schedule):
             group, now, horizon_secs=99 * 60):
         if is_last:
             last_marks.add(trip_id)
-        if trip_id in per_trip or t < sched_floor:
+        if trip_id in per_trip:
             continue
+        # a trip admitted last poll stays admitted while still in the
+        # future — one realtime blip must not flap it out (and back in)
+        if t < sched_floor and trip_id not in admitted_prev:
+            continue
+        admitted.add(trip_id)
         per_trip[trip_id] = (t, route_id, trip_id, 0, False)
 
+    group["_admitted"] = admitted
     out = [(t, rid, trip, delay, live, trip in last_marks)
            for (t, rid, trip, delay, live) in sorted(per_trip.values())]
-    return out[:MAX_ARRIVALS], {"held": held, "occupancy": occupancy}
+    # headroom for the walk filter: the caller slices to MAX_ARRIVALS
+    # after dropping uncatchable buses
+    return out[:MAX_ARRIVALS * 2], {"held": held, "occupancy": occupancy}
 
 
 def plain_text(text):
@@ -2476,14 +2510,17 @@ def classify_alert(text):
                             "suspended", "will not service",
                             "not be servic")):
         return "suspension"
-    if any(k in t for k in ("detour", "reroute", "closed", "closure",
-                            "relocat", "use stop")):
+    if any(k in t for k in ("detour", "reroute", "use stop")):
         return "detour"
     if any(k in t for k in ("delay", "running late", "behind schedule")):
         return "delays"
+    # future-tense closures are PLANNED work, not a live detour — test the
+    # planned wording before the bare closed/relocated keywords
     if any(k in t for k in ("construction", "planned", "will begin",
                             "beginning", "starting")):
         return "planned"
+    if any(k in t for k in ("closed", "closure", "relocat")):
+        return "detour"
     return "other"
 
 
@@ -2552,7 +2589,7 @@ def fetch_alerts(cfg):
             else:
                 continue
             kind = classify_alert(head)
-            key = plain_text(head)[:60]
+            key = plain_text(head)
             if key in seen:
                 continue
             seen.add(key)
@@ -2761,6 +2798,13 @@ class App:
         self.walk = walk or {}      # designator -> minutes to its stop
         self.rotate_secs = rotate_secs  # 0 = no idle auto-rotation
         self.last_rotate = time.time()
+        self.rotate_hold_until = 0.0  # START parks the tour until then
+        self.raw_arrivals = []      # pre-walk-filter, to tell "no service"
+        #                             from "nothing catchable right now"
+        self.last_push = time.time()  # keep-alive vs the 90s element TTL
+        self.held_ts = 0.0
+        self.alerts_ts = time.time()
+        self.config_inputs = None   # resolve_config args, for reloads
         self.full_cfg = cfg
         self.groups = cfg["groups"]
         self.cfg = self.groups[0]   # active group; fetcher may swap to the
@@ -2786,10 +2830,13 @@ class App:
     # -- rendering ---------------------------------------------------------
 
     def displayed(self):
-        if not self.arrivals:
+        # snapshot: the fetcher rebinds self.arrivals from the loop thread
+        # while this can run in a render worker thread
+        arr = self.arrivals
+        if not arr:
             return None
-        self.index = max(0, min(self.index, len(self.arrivals) - 1))
-        return self.arrivals[self.index]
+        self.index = max(0, min(self.index, len(arr) - 1))
+        return arr[self.index]
 
     def _alert(self, *kinds):
         for a in self.alerts:
@@ -2808,15 +2855,24 @@ class App:
 
     def _next_service(self):
         """(designator, marquee) for the quiet plate: the first scheduled
-        departure across the groups, primary first on ties."""
+        departure across the groups YOU CAN STILL CATCH — a plate that
+        advertises the bus the walk filter just hid would be a lie."""
         if not self.schedule:
             return None
         now = time.time()
         best = None
         for g in self.groups:
-            nxt = self.schedule.next_departure(g, now)
-            if nxt and (best is None or nxt[0] < best[0]):
-                best = nxt
+            t0 = now
+            for _ in range(8):  # skip departures inside their walk window
+                nxt = self.schedule.next_departure(g, t0)
+                if not nxt:
+                    break
+                walk = self.walk.get(designator(nxt[1]), 0)
+                if nxt[0] - now >= walk * 60:
+                    if best is None or nxt[0] < best[0]:
+                        best = nxt
+                    break
+                t0 = nxt[0] + 1
         if not best:
             return None
         t, rid = best
@@ -2836,8 +2892,14 @@ class App:
     def _screen_elements(self, offset=0):
         """What belongs on screen right now: a status takeover plate, or
         the ordinary card (with the amber dot during live alerts)."""
-        if self.status_assets:
-            if not self.arrivals:
+        arrivals = self.arrivals  # snapshot: the fetcher rebinds this
+        index = self.index
+        if self.status_assets and not arrivals:
+            # suspension/planned takeovers only when buses are GENUINELY
+            # absent — an all-uncatchable board (raw non-empty) must not
+            # fly NO BUSES over a running service; it goes straight to the
+            # walk-aware quiet plate below
+            if not self.raw_arrivals:
                 a = self._alert("suspension")
                 if a:
                     mq = a["head"] + ("   " + a["period"]
@@ -2855,16 +2917,16 @@ class App:
                         self._status_bullet(a),
                         marquee=mq.upper(),
                         marquee_color="#201A02FF"), "plate_plan"
-                nxt = self._next_service()
-                if nxt:
-                    desig, mq = nxt
-                    bullet = (self.assets[desig]["bullet_name"]
-                              if desig in self.assets else None)
-                    return build_plate_screen(
-                        self.status_assets, "quiet", bullet,
-                        marquee=mq), "plate_quiet"
-        # a held or late shown bus stays on the normal board (red minutes
-        # + "+N" tag, built into build_screen) — never a takeover plate
+            nxt = self._next_service()
+            if nxt:
+                desig, mq = nxt
+                bullet = (self.assets[desig]["bullet_name"]
+                          if desig in self.assets else None)
+                return build_plate_screen(
+                    self.status_assets, "quiet", bullet,
+                    marquee=mq), "plate_quiet"
+        # a held or late shown bus stays on the normal board (red glow
+        # under the minutes, built into build_screen) — never a takeover
         shown = self.displayed()
         late_secs = 0
         if self.status_assets and shown:
@@ -2873,14 +2935,15 @@ class App:
             elif shown[4] and shown[3] >= DELAY_RED_SECS:
                 late_secs = shown[3]
         dot = bool(self.status_assets
-                   and self._alert("delays", "suspension", "planned"))
+                   and self._alert("delays", "suspension", "planned",
+                                   "detour", "other"))
         glow = self.status_assets.get("lateglow") if self.status_assets \
             else None
-        els = build_screen(self.cfg, self.assets, self.arrivals, self.index,
+        els = build_screen(self.cfg, self.assets, arrivals, index,
                            offset, alert_dot=dot, late_secs=late_secs,
                            late_plate=glow and glow["name"])
-        return els, ("card" if self.arrivals else "msg") + \
-            ("+a" if dot else "")
+        return els, ("card" if arrivals else "msg") + \
+            ("+a" if (dot and arrivals) else "")
 
     def _push(self, offset=0):
         """One draw attempt; tracks blocked state. Returns True if drawn."""
@@ -2896,6 +2959,7 @@ class App:
         drawn = self.bar.draw(els)
         was_blocked, self.blocked = self.blocked, not drawn
         if drawn:
+            self.last_push = time.time()
             self.dot_count = len(self.arrivals)
             self.canvas_mode = mode
             d = self.displayed()
@@ -2926,10 +2990,18 @@ class App:
                 print(f"[{time.strftime('%H:%M:%S')}] draw error: {e}",
                       file=sys.stderr)
 
-    async def slide_to(self, new_index, direction=1):
-        """Eased slide to another arrival (up = next, down = previous)."""
-        self.page_hold_until = 0.0  # the dial always wins over alert pages
+    async def slide_to(self, new_index, direction=1, user=True):
+        """Eased slide to another arrival (up = next, down = previous).
+        `user` marks a human action (dial/button), which always wins over
+        alert pages; the rotator passes user=False and stands down if a
+        page or flash took the screen while it waited for the lock."""
+        if user:
+            self.page_hold_until = 0.0  # the dial wins over alert pages
         async with self.lock:
+            if not user and (time.time() < self.page_hold_until
+                             or not (self.canvas_mode or "")
+                             .startswith("card")):
+                return
             if self.blocked or not self.arrivals:
                 self.index = new_index
                 try:
@@ -2965,8 +3037,12 @@ class App:
                       file=sys.stderr)
 
     async def departure_flash(self, departed_route):
-        """Full-screen wipe in the departed line's color, then the next
-        train slides in."""
+        """Full-screen wipe in the departed route's color, then the next
+        bus slides in."""
+        # leave "card" mode synchronously, BEFORE any await: the rotator's
+        # guards read canvas_mode without the lock, and a rotation queued
+        # behind the flash would slide right past the newly-revealed bus
+        self.canvas_mode = None
         async with self.lock:
             self.index = 0
             if self.blocked:
@@ -3018,10 +3094,21 @@ class App:
                     best = i
         return best
 
+    _PAGE_ORDER = ("delays", "suspension", "detour", "planned", "other")
+
+    def _page_alert(self):
+        """The alert the page cycle is currently about — same precedence
+        _pick_page uses; drives the page's bullet."""
+        for kind in self._PAGE_ORDER:
+            a = self._alert(kind)
+            if a:
+                return a
+        return None
+
     def _pick_page(self):
         """The alert page worth interrupting the card for, most urgent
-        first: live delays, a track change on the shown train, planned
-        work coming up."""
+        first: live delays, partial suspensions, detours, planned work,
+        then anything the classifier couldn't name."""
         a = self._alert("delays")
         if a:
             return ("alertpg", a["head"].upper(), WHITE)
@@ -3041,6 +3128,12 @@ class App:
         if a:
             mq = a["head"] + ("   " + a["period"] if a["period"] else "")
             return ("planned", mq.upper(), "#201A02FF")
+        a = self._alert("other")
+        if a:
+            # unclassified prose still deserves the generic ALERT page —
+            # fetched-but-invisible alerts helped nobody
+            mq = a["head"] + ("   " + a["period"] if a["period"] else "")
+            return ("alertpg", mq.upper(), WHITE)
         return None
 
     async def _page_recover(self):
@@ -3069,24 +3162,29 @@ class App:
         if not page or not self.status_assets:
             return
         screen_key, marquee, mcolor = page
-        shown = self.displayed()
-        bullet = (self.assets[asset_desig(self.assets, shown[1])]
-                  ["bullet_name"] if shown else self._status_bullet())
+        # the page's bullet is the ALERTING route's, not whichever bus
+        # happens to be on screen — a V-only alert must not fly a VE plate
+        bullet = self._status_bullet(self._page_alert())
         els = build_plate_screen(self.status_assets, screen_key, bullet,
                                  marquee=marquee,
                                  marquee_color=mcolor or "#FFD2CCFF")
-        hold = (min(12.0, max(4.0, marquee_pass_secs(marquee) + 0.5))
+        hold = (min(20.0, max(4.0, marquee_pass_secs(marquee) + 0.5))
                 if marquee else 5.0)
         wash = [{"id": "wash", "type": "animation",
                  "path": self.status_assets["wash"]["name"],
                  "x": 0, "y": 0, "loop": False,
                  "timeout": ELEMENT_TIMEOUT}]
+        # leave "card" mode before the first await so the rotator's
+        # unlocked guards stand down for the whole swap
+        self.canvas_mode = "alert_swap"
         async with self.lock:
             if self.blocked:
+                self.canvas_mode = None
                 return
             try:
                 if not await asyncio.to_thread(self.bar.draw, wash):
                     self.blocked = True
+                    self.canvas_mode = None
                     return
                 await asyncio.sleep(WASH_SECS)  # ends black and holds
                 await asyncio.to_thread(self.bar.clear)
@@ -3096,12 +3194,16 @@ class App:
                     self.blocked = True
                     return
                 self.canvas_mode = "alert_page"
+                # arm the hold INSIDE the lock: a fetch landing between
+                # the swap and an outside assignment used to redraw the
+                # card over a freshly-drawn page
+                self.page_hold_until = time.time() + hold
+                self.last_push = time.time()
             except requests.RequestException as e:
                 print(f"[{time.strftime('%H:%M:%S')}] alert page error: "
                       f"{e}", file=sys.stderr)
                 await self._page_recover()
                 return
-        self.page_hold_until = time.time() + hold
         await asyncio.sleep(hold)
         self.page_hold_until = 0.0
         async with self.lock:
@@ -3127,9 +3229,17 @@ class App:
                     print(f"[{time.strftime('%H:%M:%S')}] service status: "
                           f"{kinds}")
                 self.alerts = alerts
+                self.alerts_ts = time.time()
             except Exception as e:
                 print(f"[{time.strftime('%H:%M:%S')}] alerts fetch error: "
                       f"{e}", file=sys.stderr)
+                # a dead alerts feed must not pin a stale amber dot and
+                # a stale ALERT page to the board forever
+                if (self.alerts and time.time() - self.alerts_ts
+                        > ALERTS_TTL_POLLS * ALERTS_POLL_SECS):
+                    self.alerts = []
+                    print(f"[{time.strftime('%H:%M:%S')}] alerts feed "
+                          "silent too long; clearing stale alerts")
             await asyncio.sleep(ALERTS_POLL_SECS)
 
     def _fetch_active(self):
@@ -3143,25 +3253,31 @@ class App:
                 first_status = status
             if arrivals:
                 return g, arrivals, status
-        return self.groups[0], [], first_status or {"held": {},
+        return self.groups[0], [], first_status or {"held": None,
                                                     "occupancy": {}}
 
     async def _adopt(self, arrivals):
         """Swap in a new arrivals list, keeping the shown bus by trip
-        identity. When the shown bus is gone — physically departed, or its
-        countdown just crossed under the walk time — that is a departure as
-        far as the rider is concerned: play its flash and move on."""
+        identity. Only the SOONEST bus earns the departure flash when it
+        goes (physically departed, or its countdown crossed under the walk
+        time) — a later bus vanishing mid-tour just slides away, and the
+        board snaps home."""
         shown = self.displayed()
+        was_soonest = shown is not None and self.index == 0
         self.arrivals = arrivals
         match = shown and self._same_train(shown, arrivals)
         if time.time() < self.page_hold_until:
             if match is not None:
                 self.index = match  # data stays fresh; page stays up
-        elif shown and match is None and arrivals:
+        elif shown and match is None and was_soonest:
+            # flashes into an empty board too: the day's last bus crossing
+            # the walk line is the crossing most worth announcing
             await self.departure_flash(shown[1])
         else:
             if match is not None:
                 self.index = match
+            elif shown is not None:
+                self.index = 0  # the toured bus vanished; go home quietly
             await self.render()
 
     async def fetcher(self):
@@ -3174,16 +3290,22 @@ class App:
                           f"the {'/'.join(group['designators'])} group "
                           f"({group['dir_word']})")
                     self.cfg = group
-                self.held = status["held"]
+                if status["held"] is not None:
+                    self.held = status["held"]
+                    self.held_ts = time.time()
+                elif self.held and (time.time() - self.held_ts
+                                    > HELD_TTL_SECS):
+                    self.held = {}  # VehiclePositions silent too long
                 self.occupancy = status["occupancy"]
-                kept = catchable(arrivals, self.walk)
-                await self._adopt(kept)
+                self.raw_arrivals = arrivals
+                kept_all = catchable(arrivals, self.walk)
+                await self._adopt(kept_all[:MAX_ARRIVALS])
                 nxt = ", ".join(
                     f"{designator(r)}:{int(max(0, t - time.time()) // 60)}m"
                     f"{'' if live else '*'}"
                     for t, r, _trip, _d, live, _l in self.arrivals[:4])
                 state = "blocked" if self.blocked else "showing"
-                gone = len(arrivals) - len(kept)
+                gone = len(arrivals) - len(kept_all)
                 walked = f", {gone} past walk" if gone else ""
                 print(f"[{time.strftime('%H:%M:%S')}] {len(self.arrivals)} "
                       f"arrivals ({state}{walked})  {nxt}")
@@ -3193,24 +3315,32 @@ class App:
             await asyncio.sleep(FETCH_SECS)
 
     async def supervisor(self):
-        """Retry while blocked; flip the minutes exactly on the boundary;
-        interrupt with the alert page on its cadence."""
+        """Retry while blocked; keep elements alive through feed outages;
+        flip the minutes exactly on the boundary; drop buses the moment
+        they cross their walk line; interrupt with the alert page."""
         while True:
             await asyncio.sleep(BLOCKED_RETRY_SECS if self.blocked
                                 else TICK_SECS)
-            d = self.displayed()
-            if d is None:
-                continue
             if self.blocked:
+                # retried even with an empty board: a takeover plate must
+                # be re-asserted at the polite cadence too
                 await self.render()  # cheap 409 until we own the screen
                 continue
             if time.time() < self.page_hold_until:
                 continue  # an alert page owns the screen right now
+            if time.time() - self.last_push > ELEMENT_TIMEOUT / 2:
+                # feed outages must not let the 90s element timeout blank
+                # the board: unconditional keep-alive at half-life
+                await self.render()
+                continue
             # a countdown can cross under the walk time between polls —
             # drop the bus (with its flash, via _adopt) the tick it does
             kept = catchable(self.arrivals, self.walk)
             if len(kept) != len(self.arrivals):
                 await self._adopt(kept)
+                continue
+            d = self.displayed()
+            if d is None:
                 continue
             if (self.status_assets and self.arrivals
                     and (self.canvas_mode or "").startswith("card")
@@ -3228,19 +3358,24 @@ class App:
             if (self.index != 0 and not self.blocked
                     and time.time() >= self.page_hold_until
                     and time.time() - self.last_dial > IDLE_RESET_SECS):
-                await self.slide_to(0, direction=-1)
+                await self.slide_to(0, direction=-1, user=False)
 
     async def rotator(self):
         """With the dial idle, tour the next few catchable buses on a calm
         cadence — soonest, then the next ROTATE_DEPTH-1, wrap to soonest.
-        Any dial motion pauses the tour until IDLE_RESET_SECS of quiet, and
-        a wrap from a dialed-out position doubles as the idle snap-home
-        (idle_reset stays unregistered while rotation is on)."""
+        Any dial motion pauses the tour until IDLE_RESET_SECS of quiet
+        (START parks it for START_HOLD_SECS), and a wrap from a dialed-out
+        position doubles as the idle snap-home (idle_reset stays
+        unregistered while rotation is on). slide_to(user=False) re-checks
+        the guards under the lock, so a flash or page that grabs the
+        screen while we wait cancels the rotation instead of racing it."""
         while True:
             await asyncio.sleep(1)
             now = time.time()
             if (len(self.arrivals) > 1 and not self.blocked
+                    and not self.lock.locked()
                     and now >= self.page_hold_until
+                    and now >= self.rotate_hold_until
                     and (self.canvas_mode or "").startswith("card")
                     and now - self.last_dial > IDLE_RESET_SECS
                     and now - self.last_rotate >= self.rotate_secs):
@@ -3250,7 +3385,37 @@ class App:
                     nxt = 0
                 self.last_rotate = now
                 if nxt != self.index:
-                    await self.slide_to(nxt, direction=1 if nxt else -1)
+                    await self.slide_to(nxt, direction=1 if nxt else -1,
+                                        user=False)
+
+    async def on_ok(self):
+        """OK while we own the screen (the firmware swallows it, so it is
+        ours): fly the current service-alert page on demand instead of
+        waiting for the 75s cycle. No alerts -> no-op."""
+        if self.blocked or not self.status_assets:
+            return
+        if time.time() < self.page_hold_until:
+            return  # a page is already up
+        if self._pick_page():
+            await self.alert_page()
+
+    async def on_start(self):
+        """START: snap home to the soonest bus and park the auto-tour for
+        a while — the 'just show me the next bus' button."""
+        if self.blocked:
+            return
+        self.rotate_hold_until = time.time() + START_HOLD_SECS
+        self.last_dial = time.time()
+        await self.slide_to(0, direction=-1)
+
+    async def on_canvas_lost(self):
+        """A short BACK or any slider move makes the firmware tear our
+        canvas down unconditionally — nothing restores it, and no event
+        says it happened beyond the input itself. Redraw right away
+        instead of waiting for the next fetch."""
+        self.canvas_mode = None
+        self.dot_count = 0
+        await self.render()
 
     async def dial_listener(self):
         try:
@@ -3259,24 +3424,60 @@ class App:
             print("dial disabled: `pip install websockets` to scroll "
                   "arrivals with the dial over USB")
             return
+        down_since = None
         while True:
             try:
                 async with websockets.connect(self.bar.t.ws_uri) as ws:
                     await ws.send(json.dumps({"enable": True}))
-                    print("dial connected — spin to scroll arrivals")
+                    down_since = None
+                    print("dial connected — spin to scroll, OK for "
+                          "alerts, START to snap home")
                     async for msg in ws:
                         if isinstance(msg, str):
                             continue
-                        moved = sum(encoder_deltas(msg))
+                        events = input_events(msg)
+                        # bursts batch many encoder events into one frame
+                        moved = sum(d for k, d, _ in events
+                                    if k == "encoder")
                         if moved and self.arrivals:
                             self.last_dial = time.time()
+                            self.rotate_hold_until = 0.0
                             await self.slide_to(
                                 (self.index + moved) % len(self.arrivals),
                                 direction=1 if moved > 0 else -1)
+                        for kind, a, b in events:
+                            if kind == "button" and b == ACT_PRESS:
+                                if a == BTN_OK:
+                                    await self.on_ok()
+                                elif a == BTN_START:
+                                    await self.on_start()
+                            elif kind == "switch" or (
+                                    kind == "button" and a == BTN_BACK
+                                    and b == ACT_RELEASE):
+                                await self.on_canvas_lost()
             except Exception as e:
-                print(f"dial stream lost ({e}); retrying in 5s",
-                      file=sys.stderr)
-                await asyncio.sleep(5)
+                # log once per outage, not every 5s — retries used to be
+                # 74% of the manager's whole log buffer
+                if down_since is None:
+                    down_since = time.time()
+                    print(f"dial stream lost ({e}); retrying quietly",
+                          file=sys.stderr)
+            await asyncio.sleep(5)
+
+    async def _forever(self, name, fn):
+        """A background task must never take the whole app down: log the
+        escape, wait, restart. (Inner loops catch what they expect; this
+        catches what they didn't.)"""
+        while True:
+            try:
+                await fn()
+                return  # normal completion (e.g. dial support disabled)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[{time.strftime('%H:%M:%S')}] {name} task crashed: "
+                      f"{e!r}; restarting in 10s", file=sys.stderr)
+                await asyncio.sleep(10)
 
     async def run(self):
         # drop any elements a previous version left behind (draws merge by
@@ -3285,16 +3486,38 @@ class App:
             await asyncio.to_thread(self.bar.clear)
         except requests.RequestException:
             pass
-        tasks = [self.fetcher(), self.supervisor()]
+        tasks = [self._forever("fetcher", self.fetcher),
+                 self._forever("supervisor", self.supervisor)]
+        if self.schedule and self.config_inputs:
+            tasks.append(self._forever("schedule", self.schedule_reloader))
         if self.status_assets:
-            tasks.append(self.alerts_poller())
+            tasks.append(self._forever("alerts", self.alerts_poller))
         if self.bar.t.ws_uri:
-            tasks.append(self.dial_listener())
+            tasks.append(self._forever("dial", self.dial_listener))
         if self.rotate_secs:
-            tasks.append(self.rotator())  # wraps home; subsumes idle_reset
+            tasks.append(self._forever("rotator", self.rotator))
         elif self.bar.t.ws_uri:
-            tasks.append(self.idle_reset())
+            tasks.append(self._forever("idle", self.idle_reset))
         await asyncio.gather(*tasks)
+
+    async def schedule_reloader(self):
+        """The GTFS feed is per-semester and load_schedule() re-downloads
+        a cache older than a day — but only when called. A long-running
+        process must roll the semester over without a restart, or it
+        quietly loses schedule padding, LAST tags and the quiet plate."""
+        while True:
+            await asyncio.sleep(6 * 3600)
+            try:
+                schedule = await asyncio.to_thread(load_schedule)
+                cfg = resolve_config(schedule, *self.config_inputs)
+                self.schedule = schedule
+                self.groups = cfg["groups"]
+                self.cfg = self.groups[0]
+                self.stop_names = schedule.stops
+                print(f"[{time.strftime('%H:%M:%S')}] schedule reloaded")
+            except Exception as e:
+                print(f"[{time.strftime('%H:%M:%S')}] schedule reload "
+                      f"failed (keeping the old one): {e}", file=sys.stderr)
 
     async def demo(self):
         """Fake departure sequence to preview the art and animations."""
@@ -3399,8 +3622,9 @@ class App:
         group, arrivals, status = await asyncio.to_thread(
             self._fetch_active)
         self.cfg = group
-        self.arrivals = catchable(arrivals, self.walk)
-        self.held = status["held"]
+        self.raw_arrivals = arrivals
+        self.arrivals = catchable(arrivals, self.walk)[:MAX_ARRIVALS]
+        self.held = status["held"] or {}
         self.occupancy = status["occupancy"]
         await self.render()
         nxt = ", ".join(
@@ -3412,26 +3636,46 @@ class App:
               f"{nxt}   (* = scheduled, no realtime yet)")
 
 
-def encoder_deltas(frame):
-    """Extract dial rotation deltas from one status WS binary frame
-    (BSB_State.State: updates=2 -> input=11 -> encoder_event=3 ->
-    delta=1, zigzag sint32)."""
-    deltas = []
+def input_events(frame):
+    """Physical-input events from one status WS binary frame, in order:
+    ("encoder", delta, None) | ("button", button, action) |
+    ("switch", position, None).
+    BSB_State.State: updates=2 -> input=11; InputEvent: button_event=1
+    {button=1, action=2}, switch_event=2 {position=1}, encoder_event=3
+    {delta=1, zigzag sint32}. proto3 omits zero-valued fields, so an
+    empty ButtonEvent means {OK, PRESS}. The 11-frame/s limiter batches
+    bursts — one frame can carry many events, so always iterate all."""
+    out = []
     for f, w, update in _walk_fields(frame):
         if f != 2 or w != 2:
             continue
         for f2, w2, inp in _walk_fields(update):
             if f2 != 11 or w2 != 2:
                 continue
-            for f3, w3, enc in _walk_fields(inp):
-                if f3 != 3 or w3 != 2:
+            for f3, w3, ev in _walk_fields(inp):
+                if w3 != 2:
                     continue
-                delta = 0
-                for f4, w4, v in _walk_fields(enc):
-                    if f4 == 1 and w4 == 0:
-                        delta = (v >> 1) ^ -(v & 1)  # zigzag decode
-                deltas.append(delta)
-    return deltas
+                if f3 == 1:
+                    btn = act = 0
+                    for f4, w4, v in _walk_fields(ev):
+                        if f4 == 1 and w4 == 0:
+                            btn = v
+                        elif f4 == 2 and w4 == 0:
+                            act = v
+                    out.append(("button", btn, act))
+                elif f3 == 2:
+                    pos = 0
+                    for f4, w4, v in _walk_fields(ev):
+                        if f4 == 1 and w4 == 0:
+                            pos = v
+                    out.append(("switch", pos, None))
+                elif f3 == 3:
+                    delta = 0
+                    for f4, w4, v in _walk_fields(ev):
+                        if f4 == 1 and w4 == 0:
+                            delta = (v >> 1) ^ -(v & 1)  # zigzag
+                    out.append(("encoder", delta, None))
+    return out
 
 
 # ----------------------------------------------------------------------- CLI
@@ -3554,20 +3798,39 @@ def main():
         print(f"asset upload failed: {e}", file=sys.stderr)
 
     walk_spec = args.walk or os.environ.get("WALK") or WALK_DEFAULT
-    walk = {} if walk_spec.strip().lower() in ("off", "0", "none") \
-        else parse_walk(walk_spec)
+    if walk_spec.strip().lower() in ("off", "0", "none"):
+        walk = {}
+    else:
+        walk = parse_walk(walk_spec)
+        if not walk:
+            # WALK=3 or WALK=junk silently disabling the filter would be
+            # a different behavior set with no hint; stay visible instead
+            config_error_loop(bar, ConfigError(
+                f"WALK {walk_spec!r} unparseable — expected e.g. "
+                "V:2,VE:4,NV:3 or 'off'", "check WALK"))
+            return
     rotate_spec = args.rotate or os.environ.get("ROTATE") or ROTATE_DEFAULT
     try:
         rotate_secs = int(rotate_spec)
         rotate_secs = 0 if rotate_secs <= 0 else max(3, rotate_secs)
     except ValueError:
-        rotate_secs = 0     # "off" and friends
+        if rotate_spec.strip().lower() not in ("off", "none", "no",
+                                               "false"):
+            config_error_loop(bar, ConfigError(
+                f"ROTATE {rotate_spec!r} unparseable — expected seconds "
+                "or 'off'", "check ROTATE"))
+            return
+        rotate_secs = 0
     if walk:
         print("walk times: " + ", ".join(
             f"{d} {m}min" for d, m in sorted(walk.items())))
 
     app = App(bar, cfg, assets, status_assets, schedule,
               walk=walk, rotate_secs=rotate_secs)
+    app.config_inputs = (routes_csv, stops_csv, direction,
+                         os.environ.get("FALLBACK_ROUTES") or "",
+                         os.environ.get("FALLBACK_STOPS") or "",
+                         os.environ.get("FALLBACK_DIRECTION") or "")
     try:
         if args.demo_alerts:
             coro = app.demo_alerts()
