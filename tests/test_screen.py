@@ -1,8 +1,8 @@
 """Board-rendering tests for the held/late treatment and the walk filter.
-A delayed bus keeps the normal board — text stays WHITE, the shaded red
-late-glow plate slides in under the minutes, and the "min" unit becomes a
-bold "+N" (minutes late) — and the element-id set is identical either way
-so late<->on-time flips never force a canvas clear. The walk filter hides
+A delayed bus keeps the normal board — the live ETA in white with its
+"min" — and the shaded red late-glow plate sliding in under the minutes
+is the whole delay signal. The element-id set is identical either way so
+late<->on-time flips never force a canvas clear. The walk filter hides
 buses that depart sooner than the walk to their stop."""
 
 import sys
@@ -38,14 +38,12 @@ def test_on_time_board_white_glow_parked():
     assert els["lateglow"]["y"] < 0
 
 
-def test_late_board_glow_in_unit_becomes_plus_n():
+def test_late_board_glow_in_text_untouched():
     els = board(late_secs=6 * 60)
     assert els["num"]["color"] == app.WHITE      # ETA stays the hero
-    assert els["lateglow"]["y"] == 0
-    assert els["unit"]["text"] == "+6"           # readable bold, not tiny
-    assert els["unit"]["font"] == "bold"
+    assert els["lateglow"]["y"] == 0             # the red field IS the signal
+    assert els["unit"]["text"] == "min"          # no +N figure anywhere
     assert els["unit"]["color"] == app.WHITE
-    assert els["unit"]["y"] == 15                # same slot "min" lives in
 
 
 def test_glow_sits_under_everything():
@@ -57,7 +55,7 @@ def test_glow_sits_under_everything():
 def test_last_tag_coexists_with_lateness():
     els = board(late_secs=5 * 60, is_last=True)
     assert els["last"]["y"] == 0
-    assert els["unit"]["text"] == "+5"
+    assert els["unit"]["text"] == "min"
 
 
 def test_now_case_keeps_glow_parks_unit():

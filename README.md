@@ -44,10 +44,9 @@ lower Vairo Village (stop 506). Any routes/stops work via env.
   **DETOUR** page, an amber corner dot + periodic **ALERT** page cycle for
   everything else. A held or late bus (vehicle stopped >3 min against the
   feed's own clock, or running ≥4 min behind schedule) keeps the normal
-  board — the live ETA is the number that matters and the dial keeps
-  scrolling — with a **shaded red plate sliding in under the minutes**
-  (text stays white) and the `min` unit becoming a bold **+N** for how
-  many minutes late it's running.
+  board — the live ETA (delay already baked in) in white, `min` and all,
+  dial still scrolling — and a **shaded red plate sliding in under the
+  minutes** is the whole signal.
 
 ## Data sources (all public, no API key)
 

@@ -2636,13 +2636,12 @@ def build_screen(cfg, assets, arrivals, index, offset=0, alert_dot=False,
                  late_secs=0, late_plate=None):
     """One arrival card, optionally shifted vertically by `offset` px.
     `late_secs` > 0 means the shown trip is held or running late: the board
-    stays exactly the same — the ETA is the number that matters and the
-    dial keeps scrolling — but the shaded red `late_plate` slides in under
-    the minutes (text stays WHITE over it) and the "min" unit becomes
-    "+N" (minutes late) at the same bold size: the red field already says
-    these are minutes, and tiny type was unreadable from the couch. The
-    element-id set is identical either way, so late<->on-time flips never
-    need a canvas clear."""
+    stays exactly the same — the live ETA in white with its "min", the
+    dial keeps scrolling — and the shaded red `late_plate` sliding in
+    under the minutes is the whole signal. (A "+N minutes late" figure was
+    tried twice: tiny type was unreadable, bold type crowded the number,
+    and the ETA already has the delay baked in.) The element-id set is
+    identical either way, so late<->on-time flips never need a clear."""
     els = []
     if not arrivals:
         routes_label = "/".join(
@@ -2705,8 +2704,7 @@ def build_screen(cfg, assets, arrivals, index, offset=0, alert_dot=False,
             "x": 41, "y": 8 + offset, "timeout": ELEMENT_TIMEOUT,
         })
         els.append({
-            "id": "unit", "type": "text",
-            "text": f"+{late}" if late else "min",
+            "id": "unit", "type": "text", "text": "min",
             "font": "bold", "color": WHITE, "align": "bottom_left",
             "x": 44, "y": 15 + offset, "timeout": ELEMENT_TIMEOUT,
         })
