@@ -98,16 +98,18 @@ python3 -m venv .venv && .venv/bin/pip install pytest requests websockets
 `tools/dial_forward.py` forwards the Bar's USB status websocket over a
 tailnet so the dial works when the app runs on a server (`BUSYBAR_WS`).
 
-## Hardware verification checklist (pending — built off-Bar)
+## Hardware verification checklist
 
-Everything below works in `--preview`; confirm on the device when it's
-back in reach:
+Verified live 2026-09-01 (manager library install on a VPS, cloud relay,
+forwarded dial):
 
 - [ ] V / VE / NV route-plate legibility at LED scale; tune letters with
       `tools/bullet_editor.py` (arrow keys, sizes, Save bakes offsets)
-- [ ] departure flash `.anim` plays smoothly and ends black
-- [ ] status plates + amber wash page cycle; marquee pass timing
+- [x] departure flash `.anim` plays smoothly and ends black
+- [x] status plates + amber wash page cycle; live DELAYED state caught a
+      real held V within minutes of install
 - [ ] LAST tag placement over "min"
-- [ ] dial scroll + 25s idle reset (USB, then forwarded WS)
-- [ ] 409 politeness at priority 1; manager install as a library app with
-      a `vairo-campus` variation (priority 30, `BUSYBAR_WS` set)
+- [x] dial scroll (forwarded WS) + idle behavior; auto-rotation tours the
+      next catchable buses and wraps home
+- [x] manager install as a library app (priority 30, `BUSYBAR_WS` set);
+      walk filter live ("N past walk" in the log)
