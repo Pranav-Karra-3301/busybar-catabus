@@ -34,6 +34,15 @@ in busybar-manager, put these in a variation's "Environment variables"):
                 the no-service fallback group, default NV @ 503,507
                 outbound (the NV loop's Sunday Vairo coverage). Set
                 FALLBACK_ROUTES=off to disable.
+    WALK        minutes to reach each route's stop, "V:2,VE:4,NV:3"
+                (the default). A bus departing in fewer minutes than
+                its walk can't be caught and is hidden; when the shown
+                bus crosses that line its departure flash plays. "off"
+                shows every bus.
+    ROTATE      seconds per bus for the idle auto-rotation through the
+                next few catchable buses (default 7; "off" disables —
+                the board then sits on the soonest bus, dial-only)
+    ROTATE_DEPTH  how many buses the rotation tours (default 3)
 
     CATA_GTFS_URL   static GTFS zip override
     CATA_RT_BASE    GTFS-realtime base override (…&FeedType= is appended)
@@ -106,6 +115,15 @@ SCHED_MERGE_MIN = 20     # pad with scheduled trips only this far out — a
 TICK_SECS = 2            # supervisor cadence for minute flips
 BLOCKED_RETRY_SECS = 3   # draw-attempt cadence while another app owns screen
 IDLE_RESET_SECS = 25     # snap back to the next train after dial inactivity
+WALK_DEFAULT = "V:2,VE:4,NV:3"  # minutes to reach each route's stop from
+#                          the couch (defaults match the default stops);
+#                          a bus departing sooner than its walk is hidden
+ROTATE_DEFAULT = "7"     # seconds per bus in the idle auto-rotation
+#                          ("off" disables); dial motion pauses the tour
+try:
+    ROTATE_DEPTH = max(2, int(os.environ.get("ROTATE_DEPTH", "3")))
+except ValueError:
+    ROTATE_DEPTH = 3     # rotate among the first N catchable buses
 ELEMENT_TIMEOUT = 90     # stale elements self-erase if we stop pushing
 MAX_ARRIVALS = 8         # 8 position dots x 2px = the 16px display height
 FRAME_SECS = 0.04        # target animation frame interval (local transports)
@@ -124,13 +142,13 @@ ALERTS_ON = os.environ.get("BUSYBAR_ALERTS", "on").lower() not in (
 ALERTS_POLL_SECS = 120
 ALERT_PAGE_EVERY = 75     # seconds between alert-page interruptions
 HELD_AFTER_SECS = 180     # STOPPED_AT with no movement this long = held
-DELAY_RED_SECS = 240      # shown bus this late -> red minutes + "+N" tag
-                          # (a takeover plate hid the ETA and blocked the
-                          # dial — the number you need is WHEN it comes)
+DELAY_RED_SECS = 240      # shown bus this late -> red glow plate under the
+                          # white minutes + a "+N" tag (a takeover plate hid
+                          # the ETA and blocked the dial — the number you
+                          # need is WHEN it comes)
 WASH_SECS = 0.6           # the compiled amber wash that covers page swaps
 MARQUEE_RATE = 1400       # px/min for the in-plate headline marquee
 AMBER = "#FFB000FF"
-RED = "#FF3B30FF"         # late minutes — bright enough for the LEDs
 
 # ------------------------------------------------------------------- routes
 
@@ -185,6 +203,33 @@ def designator(route_id):
 
 def base_desig(desig):
     return desig
+
+
+def parse_walk(spec):
+    """'V:2,VE:4,NV:3' -> {'V': 2, 'VE': 4, 'NV': 3}: minutes of walking
+    to reach each route's stop. Routes not listed walk 0 (always shown)."""
+    out = {}
+    for part in (spec or "").split(","):
+        d, sep, m = part.strip().partition(":")
+        if not (d and sep):
+            continue
+        try:
+            out[d.strip().upper()] = max(0, int(m))
+        except ValueError:
+            pass
+    return out
+
+
+def catchable(arrivals, walk, now=None):
+    """Only the buses that can still be caught: a bus departing in fewer
+    minutes than the walk to its stop is noise, not information. Keyed by
+    designator — V, VE and NV board at different distances."""
+    if not walk:
+        return list(arrivals)
+    now = time.time() if now is None else now
+    return [a for a in arrivals
+            if int(max(0, a[0] - now) // 60)
+            >= walk.get(designator(a[1]), 0)]
 
 
 def is_express(desig):
@@ -1770,11 +1815,38 @@ def text_width(text, font):
     return max(w - 1, 1)
 
 
+def make_late_glow():
+    """The delay field: a shaded red plate (same busy-plate recipe and
+    radius as the route bullets) that slides in UNDER the minutes when the
+    shown bus is held or running late. The text above it stays white — the
+    red gradient is the signal, the ETA stays the message."""
+    pal = _plate_ramp("#7E1416")
+    w, h, r = 45, 15, 3
+    rows = []
+    for y in range(h):
+        if y == 0:
+            base = pal["spec"]
+        elif y == h - 1:
+            base = pal["lift"]
+        else:
+            base = _lerp(pal["top"], pal["bot"], (y - 1) / (h - 2))
+        row = []
+        for x in range(w):
+            cx, cy = min(x, w - 1 - x), min(y, h - 1 - y)
+            if cx < r and cy < r and (r - cx) ** 2 + (r - cy) ** 2 > r * r:
+                row.append((0, 0, 0, 0))
+            else:
+                row.append((*base, 255))
+        rows.append(row)
+    return png_encode(w, h, rows)
+
+
 def build_status_assets():
-    """The six baked status screens (looping anims + frame-0 PNGs) and
-    the wash anim, content-hash named like every other asset. `quiet` is
-    the nightly service-over plate — same words as a suspension but calm
-    slate blue: the last bus leaving on schedule is not an emergency."""
+    """The baked status screens (looping anims + frame-0 PNGs), the wash
+    anim and the late-glow plate, content-hash named like every other
+    asset. `quiet` is the nightly service-over plate — same words as a
+    suspension but calm slate blue: the last bus leaving on schedule is
+    not an emergency."""
     out = {}
     for key, screen in (
             ("susp", make_status_screen("#7E1416", "NO BUSES",
@@ -1793,6 +1865,10 @@ def build_status_assets():
     wash = anim_encode(wash_anim_frames(), 72, 16)
     out["wash"] = {"name": f"wash-{hashlib.sha256(wash).hexdigest()[:8]}"
                            ".anim", "bytes": wash}
+    glow = make_late_glow()
+    out["lateglow"] = {
+        "name": f"late_glow-{hashlib.sha256(glow).hexdigest()[:8]}.png",
+        "bytes": glow}
     return out
 
 
@@ -2557,13 +2633,14 @@ def marquee_pass_secs(text):
 
 
 def build_screen(cfg, assets, arrivals, index, offset=0, alert_dot=False,
-                 late_secs=0):
+                 late_secs=0, late_plate=None):
     """One arrival card, optionally shifted vertically by `offset` px.
     `late_secs` > 0 means the shown trip is held or running late: the board
     stays exactly the same — the ETA is the number that matters and the
-    dial keeps scrolling — but the minutes turn RED and a small red "+N"
-    (minutes late) takes the tag slot. The element-id set is identical
-    either way, so late<->on-time flips never need a canvas clear."""
+    dial keeps scrolling — but the shaded red `late_plate` slides in under
+    the minutes (text stays WHITE over it) and a small "+N" (minutes late)
+    takes the tag slot. The element-id set is identical either way, so
+    late<->on-time flips never need a canvas clear."""
     els = []
     if not arrivals:
         routes_label = "/".join(
@@ -2583,8 +2660,15 @@ def build_screen(cfg, assets, arrivals, index, offset=0, alert_dot=False,
     is_last = arrivals[index][5]
     mins = int(max(0, dep_time - time.time()) // 60)
     late = int(late_secs // 60)
-    ink = RED if late else WHITE
 
+    # bottom of the stack (first created = lowest z): the red delay field,
+    # parked off-screen while the shown bus is on time
+    if late_plate:
+        els.append({
+            "id": "lateglow", "type": "image", "path": late_plate,
+            "x": 24, "y": (0 + offset) if late else -30,
+            "timeout": ELEMENT_TIMEOUT,
+        })
     els.append({
         "id": "bullet", "type": "image",
         "path": assets[asset_desig(assets, route)]["bullet_name"],
@@ -2602,25 +2686,25 @@ def build_screen(cfg, assets, arrivals, index, offset=0, alert_dot=False,
     if mins == 0:
         els.append({
             "id": "num", "type": "text", "text": "NOW",
-            "font": "extra_large", "color": ink, "align": "center",
+            "font": "extra_large", "color": WHITE, "align": "center",
             "x": 46, "y": 8 + offset, "timeout": ELEMENT_TIMEOUT,
         })
         # park off-screen, same type: the firmware 400s a type change on an
         # existing id, so "unit" must always stay a text element
         els.append({
             "id": "unit", "type": "text", "text": "min",
-            "font": "bold", "color": ink, "align": "bottom_left",
+            "font": "bold", "color": WHITE, "align": "bottom_left",
             "x": 44, "y": -30, "timeout": ELEMENT_TIMEOUT,
         })
     else:
         els.append({
             "id": "num", "type": "text", "text": str(mins),
-            "font": "extra_large", "color": ink, "align": "mid_right",
+            "font": "extra_large", "color": WHITE, "align": "mid_right",
             "x": 41, "y": 8 + offset, "timeout": ELEMENT_TIMEOUT,
         })
         els.append({
             "id": "unit", "type": "text", "text": "min",
-            "font": "bold", "color": ink, "align": "bottom_left",
+            "font": "bold", "color": WHITE, "align": "bottom_left",
             "x": 44, "y": 15 + offset, "timeout": ELEMENT_TIMEOUT,
         })
     # the day's final scheduled departure carries a LAST tag over the
@@ -2637,7 +2721,7 @@ def build_screen(cfg, assets, arrivals, index, offset=0, alert_dot=False,
     })
     els.append({
         "id": "late", "type": "text", "text": f"+{late}",
-        "font": "tiny", "color": RED, "align": "top_left",
+        "font": "tiny", "color": WHITE, "align": "top_left",
         "x": 44, "y": (0 + offset) if (late and mins > 0) else -30,
         "timeout": ELEMENT_TIMEOUT,
     })
@@ -2678,8 +2762,11 @@ def build_flash_anim(assets, desig):
 
 class App:
     def __init__(self, bar, cfg, assets, status_assets=None,
-                 schedule=None):
+                 schedule=None, walk=None, rotate_secs=0):
         self.bar = bar
+        self.walk = walk or {}      # designator -> minutes to its stop
+        self.rotate_secs = rotate_secs  # 0 = no idle auto-rotation
+        self.last_rotate = time.time()
         self.full_cfg = cfg
         self.groups = cfg["groups"]
         self.cfg = self.groups[0]   # active group; fetcher may swap to the
@@ -2793,8 +2880,11 @@ class App:
                 late_secs = shown[3]
         dot = bool(self.status_assets
                    and self._alert("delays", "suspension", "planned"))
+        glow = self.status_assets.get("lateglow") if self.status_assets \
+            else None
         els = build_screen(self.cfg, self.assets, self.arrivals, self.index,
-                           offset, alert_dot=dot, late_secs=late_secs)
+                           offset, alert_dot=dot, late_secs=late_secs,
+                           late_plate=glow and glow["name"])
         return els, ("card" if self.arrivals else "msg") + \
             ("+a" if dot else "")
 
@@ -3058,10 +3148,27 @@ class App:
         return self.groups[0], [], first_status or {"held": {},
                                                     "occupancy": {}}
 
+    async def _adopt(self, arrivals):
+        """Swap in a new arrivals list, keeping the shown bus by trip
+        identity. When the shown bus is gone — physically departed, or its
+        countdown just crossed under the walk time — that is a departure as
+        far as the rider is concerned: play its flash and move on."""
+        shown = self.displayed()
+        self.arrivals = arrivals
+        match = shown and self._same_train(shown, arrivals)
+        if time.time() < self.page_hold_until:
+            if match is not None:
+                self.index = match  # data stays fresh; page stays up
+        elif shown and match is None and arrivals:
+            await self.departure_flash(shown[1])
+        else:
+            if match is not None:
+                self.index = match
+            await self.render()
+
     async def fetcher(self):
         while True:
             try:
-                shown = self.displayed()
                 group, arrivals, status = await asyncio.to_thread(
                     self._fetch_active)
                 if group is not self.cfg:
@@ -3069,26 +3176,19 @@ class App:
                           f"the {'/'.join(group['designators'])} group "
                           f"({group['dir_word']})")
                     self.cfg = group
-                self.arrivals = arrivals
                 self.held = status["held"]
                 self.occupancy = status["occupancy"]
-                match = shown and self._same_train(shown, self.arrivals)
-                if time.time() < self.page_hold_until:
-                    if match is not None:
-                        self.index = match  # data stays fresh; page stays up
-                elif shown and match is None and self.arrivals:
-                    await self.departure_flash(shown[1])
-                else:
-                    if match is not None:
-                        self.index = match
-                    await self.render()
+                kept = catchable(arrivals, self.walk)
+                await self._adopt(kept)
                 nxt = ", ".join(
                     f"{designator(r)}:{int(max(0, t - time.time()) // 60)}m"
                     f"{'' if live else '*'}"
                     for t, r, _trip, _d, live, _l in self.arrivals[:4])
                 state = "blocked" if self.blocked else "showing"
+                gone = len(arrivals) - len(kept)
+                walked = f", {gone} past walk" if gone else ""
                 print(f"[{time.strftime('%H:%M:%S')}] {len(self.arrivals)} "
-                      f"arrivals ({state})  {nxt}")
+                      f"arrivals ({state}{walked})  {nxt}")
             except Exception as e:
                 print(f"[{time.strftime('%H:%M:%S')}] fetch error: {e}",
                       file=sys.stderr)
@@ -3108,6 +3208,12 @@ class App:
                 continue
             if time.time() < self.page_hold_until:
                 continue  # an alert page owns the screen right now
+            # a countdown can cross under the walk time between polls —
+            # drop the bus (with its flash, via _adopt) the tick it does
+            kept = catchable(self.arrivals, self.walk)
+            if len(kept) != len(self.arrivals):
+                await self._adopt(kept)
+                continue
             if (self.status_assets and self.arrivals
                     and (self.canvas_mode or "").startswith("card")
                     and time.time() - self.last_alert_page > ALERT_PAGE_EVERY
@@ -3125,6 +3231,28 @@ class App:
                     and time.time() >= self.page_hold_until
                     and time.time() - self.last_dial > IDLE_RESET_SECS):
                 await self.slide_to(0, direction=-1)
+
+    async def rotator(self):
+        """With the dial idle, tour the next few catchable buses on a calm
+        cadence — soonest, then the next ROTATE_DEPTH-1, wrap to soonest.
+        Any dial motion pauses the tour until IDLE_RESET_SECS of quiet, and
+        a wrap from a dialed-out position doubles as the idle snap-home
+        (idle_reset stays unregistered while rotation is on)."""
+        while True:
+            await asyncio.sleep(1)
+            now = time.time()
+            if (len(self.arrivals) > 1 and not self.blocked
+                    and now >= self.page_hold_until
+                    and (self.canvas_mode or "").startswith("card")
+                    and now - self.last_dial > IDLE_RESET_SECS
+                    and now - self.last_rotate >= self.rotate_secs):
+                depth = min(ROTATE_DEPTH, len(self.arrivals))
+                nxt = self.index + 1
+                if nxt >= depth:
+                    nxt = 0
+                self.last_rotate = now
+                if nxt != self.index:
+                    await self.slide_to(nxt, direction=1 if nxt else -1)
 
     async def dial_listener(self):
         try:
@@ -3163,7 +3291,11 @@ class App:
         if self.status_assets:
             tasks.append(self.alerts_poller())
         if self.bar.t.ws_uri:
-            tasks += [self.dial_listener(), self.idle_reset()]
+            tasks.append(self.dial_listener())
+        if self.rotate_secs:
+            tasks.append(self.rotator())  # wraps home; subsumes idle_reset
+        elif self.bar.t.ws_uri:
+            tasks.append(self.idle_reset())
         await asyncio.gather(*tasks)
 
     async def demo(self):
@@ -3269,7 +3401,7 @@ class App:
         group, arrivals, status = await asyncio.to_thread(
             self._fetch_active)
         self.cfg = group
-        self.arrivals = arrivals
+        self.arrivals = catchable(arrivals, self.walk)
         self.held = status["held"]
         self.occupancy = status["occupancy"]
         await self.render()
@@ -3343,6 +3475,14 @@ def main():
                         metavar="QUERY",
                         help="print matching stops with served routes and "
                              "exit")
+    parser.add_argument("--walk", default=None,
+                        help="minutes to reach each route's stop, e.g. "
+                             "V:2,VE:4,NV:3 — buses departing sooner are "
+                             "hidden (env WALK; 'off' shows everything)")
+    parser.add_argument("--rotate", default=None,
+                        help="seconds per bus in the idle auto-rotation "
+                             "through the next few catchable buses "
+                             "(env ROTATE; 'off' disables)")
     parser.add_argument("--clear", action="store_true",
                         help="clear display and exit")
     parser.add_argument("--demo", action="store_true",
@@ -3415,7 +3555,21 @@ def main():
     except requests.RequestException as e:
         print(f"asset upload failed: {e}", file=sys.stderr)
 
-    app = App(bar, cfg, assets, status_assets, schedule)
+    walk_spec = args.walk or os.environ.get("WALK") or WALK_DEFAULT
+    walk = {} if walk_spec.strip().lower() in ("off", "0", "none") \
+        else parse_walk(walk_spec)
+    rotate_spec = args.rotate or os.environ.get("ROTATE") or ROTATE_DEFAULT
+    try:
+        rotate_secs = int(rotate_spec)
+        rotate_secs = 0 if rotate_secs <= 0 else max(3, rotate_secs)
+    except ValueError:
+        rotate_secs = 0     # "off" and friends
+    if walk:
+        print("walk times: " + ", ".join(
+            f"{d} {m}min" for d, m in sorted(walk.items())))
+
+    app = App(bar, cfg, assets, status_assets, schedule,
+              walk=walk, rotate_secs=rotate_secs)
     try:
         if args.demo_alerts:
             coro = app.demo_alerts()

@@ -15,6 +15,16 @@ lower Vairo Village (stop 506). Any routes/stops work via env.
   two-letter routes need more room than a subway-style disk — letters
   from the Bar's own fonts), minutes in extra-large type, position dots for up to 8 upcoming
   buses. Dial scrolls through them (over USB or a forwarded status socket).
+- **Only buses you can catch**: `WALK` maps each route to the minutes it
+  takes to reach its stop (default `V:2,VE:4,NV:3`, matching the default
+  stops). A bus departing sooner than its walk is hidden — and the moment
+  the shown bus crosses that line, its departure flash plays: gone is
+  gone, whether it left the stop or just left *you* behind.
+- **Idle auto-rotation**: with the dial untouched, the board tours the
+  next few catchable buses (`ROTATE` seconds each, default 7, over the
+  first `ROTATE_DEPTH`, default 3) and wraps back to the soonest. Any
+  dial motion pauses the tour for 25s; `ROTATE=off` restores the
+  static soonest-bus board.
 - **Departure flash**: full-screen sweep in the route color when the shown
   bus leaves, compiled as a device-side 60fps `.anim`.
 - **Realtime + schedule, merged by trip identity**: Avail's TripUpdates
@@ -33,8 +43,9 @@ lower Vairo Village (stop 506). Any routes/stops work via env.
   everything else. A held or late bus (vehicle stopped >3 min against the
   feed's own clock, or running ≥4 min behind schedule) keeps the normal
   board — the live ETA is the number that matters and the dial keeps
-  scrolling — with the **minutes in red** plus a small red **+N** tag for
-  how many minutes late it's running.
+  scrolling — with a **shaded red plate sliding in under the minutes**
+  (text stays white) plus a small **+N** tag for how many minutes late
+  it's running.
 
 ## Data sources (all public, no API key)
 

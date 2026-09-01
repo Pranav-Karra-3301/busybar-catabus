@@ -167,4 +167,4 @@ def test_status_words_fit():
     # "delayed" is gone on purpose: a held/late bus keeps the normal board
     # (red minutes + "+N" tag) instead of a takeover plate
     assert set(out) == {"susp", "planned", "alertpg", "quiet",
-                        "detour", "wash"}
+                        "detour", "wash", "lateglow"}
