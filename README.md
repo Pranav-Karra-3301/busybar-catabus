@@ -28,10 +28,13 @@ lower Vairo Village (stop 506). Any routes/stops work via env.
   8:24a–11:54p.
 - **Status plates** (busy-mode grammar, from the GTFS-realtime Alerts feed
   plus InfoPoint's per-route messages with their explicit detour flag):
-  red **NO BUSES** suspension takeover, hazard-striped **PLANNED**, red
-  **DELAYED** when the shown bus is held (vehicle stopped >3 min against
-  the feed's own clock) or running ≥4 min late, blue **DETOUR** page, an
-  amber corner dot + periodic **ALERT** page cycle for everything else.
+  red **NO BUSES** suspension takeover, hazard-striped **PLANNED**, blue
+  **DETOUR** page, an amber corner dot + periodic **ALERT** page cycle for
+  everything else. A held or late bus (vehicle stopped >3 min against the
+  feed's own clock, or running ≥4 min behind schedule) keeps the normal
+  board — the live ETA is the number that matters and the dial keeps
+  scrolling — with the **minutes in red** plus a small red **+N** tag for
+  how many minutes late it's running.
 
 ## Data sources (all public, no API key)
 

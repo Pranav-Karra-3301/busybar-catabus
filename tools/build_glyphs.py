@@ -42,10 +42,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 APP = ROOT / "apps" / "catabus" / "app.py"
 DATA = ROOT / "tools" / "data"
-LEGACY = Path.home() / "busybar" / "app"
+LEGACY = Path.home() / "busybar" / "truvo-sold" / "app"
 
 CHARS = ("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-         "abcdefghijklmnopqrstuvwxyz")
+         "abcdefghijklmnopqrstuvwxyz+")
 
 # hand-tuned flash letters (dumped off the device screen, user-tuned;
 # from ~/busybar/tools/build_trains_art.py XL_GLYPHS) — always win

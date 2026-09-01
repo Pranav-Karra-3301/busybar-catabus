@@ -164,5 +164,7 @@ def test_bullet_art_generates():
 def test_status_words_fit():
     # raises SystemExit if any word overflows the plate
     out = app.build_status_assets()
-    assert set(out) == {"susp", "planned", "delayed", "alertpg", "quiet",
+    # "delayed" is gone on purpose: a held/late bus keeps the normal board
+    # (red minutes + "+N" tag) instead of a takeover plate
+    assert set(out) == {"susp", "planned", "alertpg", "quiet",
                         "detour", "wash"}
