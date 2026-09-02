@@ -43,6 +43,16 @@ in busybar-manager, put these in a variation's "Environment variables"):
                 next few catchable buses (default 7; "off" disables —
                 the board then sits on the soonest bus, dial-only)
     ROTATE_DEPTH  how many buses the rotation tours (default 3)
+    WAKE        press-to-wake: "15"/"15m" minutes or "900s" seconds. The
+                board stays DARK until OK/START/dial, shows for that long
+                after the last interaction, then goes dark again; BACK
+                turns it off early. Wake presses are honored with the
+                slider on OFF (or unknown) only — elsewhere the buttons
+                belong to the firmware UI. Needs the input stream
+                (BUSYBAR_WS or USB); while the stream is down the board
+                runs always-on so it can never become unwakeable. On
+                firmware with GET /input/switch (api >= 27.7) the slider
+                position is read live at startup. Default off.
 
     CATA_GTFS_URL   static GTFS zip override
     CATA_RT_BASE    GTFS-realtime base override (…&FeedType= is appended)
@@ -76,7 +86,8 @@ Buttons (while this app owns the screen the firmware swallows OK/START —
 they are ours; BACK and slider moves always tear the canvas down, and the
 app redraws immediately when it sees them): OK = show the service-alert
 page on demand; START = snap to the soonest bus and park the auto-tour
-for a minute.
+for a minute. In WAKE mode any of OK/START/dial wakes the dark board and
+BACK puts it back to sleep.
 
 Dial: over USB the Bar's dial scrolls through upcoming arrivals (needs the
 optional `websockets` package); other transports show the next bus unless
@@ -131,6 +142,15 @@ try:
 except ValueError:
     ROTATE_DEPTH = 3     # rotate among the first N catchable buses
 START_HOLD_SECS = 60     # START snaps home and holds the tour this long
+WAKE_DEFAULT = "off"     # press-to-wake: "15"/"15m" = minutes, "900s" =
+#                          seconds. The board stays dark until OK/START/
+#                          dial, shows for that long after the last
+#                          interaction, then goes dark again. Designed for
+#                          the OFF slider position (the buttons are free
+#                          there); needs the input stream, and degrades to
+#                          always-on when the stream is down — a dark board
+#                          no button can wake is worse than a lit one.
+SWITCH_OFF_POS = 2       # SwitchPosition.OFF on the wire
 HELD_TTL_SECS = 90       # keep held state through a VehiclePositions blip
 ALERTS_TTL_POLLS = 3     # drop alerts after this many failed polls
 # BSB_Input enums (busybar-protobuf input.proto; PRESS/RELEASE only — the
@@ -231,6 +251,23 @@ def parse_walk(spec):
         except ValueError:
             pass
     return out
+
+
+def parse_wake(spec):
+    """'15'/'15m' = minutes, '900s' = seconds, 'off' = always-on (0).
+    Returns seconds, or None on unparseable input."""
+    t = (spec or "").strip().lower()
+    if t in ("off", "none", "no", "false", "0", ""):
+        return 0
+    mult = 60
+    if t.endswith("m"):
+        t = t[:-1]
+    elif t.endswith("s"):
+        t, mult = t[:-1], 1
+    try:
+        return max(60, int(t) * mult)
+    except ValueError:
+        return None
 
 
 def catchable(arrivals, walk, now=None):
@@ -1982,6 +2019,21 @@ class Bar:
         raise SystemExit("no reachable BUSY Bar target:\n  " +
                          "\n  ".join(errors))
 
+    def switch_position(self):
+        """Current slider position as a wire enum int, on firmware with
+        GET /input/switch (api >= 27.7, upstream PR #1007); None when the
+        endpoint is absent or unreachable."""
+        names = {"busy": 0, "custom": 1, "off": 2, "apps": 3,
+                 "settings": 4}
+        try:
+            r = self.s.get(self.t.url("/input/switch"),
+                           headers=self.t.headers, timeout=8)
+            if r.ok:
+                return names.get(r.json().get("position"))
+        except (requests.RequestException, ValueError):
+            pass
+        return None
+
     def upload_assets(self, assets, extra=None):
         files = {}
         for a in assets.values():
@@ -2068,6 +2120,9 @@ class PreviewBar:
         self.order = []
         self.n = 0
         os.makedirs(outdir, exist_ok=True)
+
+    def switch_position(self):
+        return None
 
     def upload_assets(self, assets, extra=None):
         for a in assets.values():
@@ -2793,12 +2848,17 @@ def build_flash_anim(assets, desig):
 
 class App:
     def __init__(self, bar, cfg, assets, status_assets=None,
-                 schedule=None, walk=None, rotate_secs=0):
+                 schedule=None, walk=None, rotate_secs=0, wake_secs=0):
         self.bar = bar
         self.walk = walk or {}      # designator -> minutes to its stop
         self.rotate_secs = rotate_secs  # 0 = no idle auto-rotation
         self.last_rotate = time.time()
         self.rotate_hold_until = 0.0  # START parks the tour until then
+        self.wake_secs = wake_secs  # 0 = always-on; else press-to-wake
+        self.awake_until = 0.0      # asleep when past this (wake mode)
+        self.input_stream_ok = False  # wake mode degrades to always-on
+        #                               while the input stream is down
+        self.switch_pos = None      # last known slider position (wire int)
         self.raw_arrivals = []      # pre-walk-filter, to tell "no service"
         #                             from "nothing catchable right now"
         self.last_push = time.time()  # keep-alive vs the 90s element TTL
@@ -2828,6 +2888,28 @@ class App:
         self.lock = asyncio.Lock()  # serializes renders/animations
 
     # -- rendering ---------------------------------------------------------
+
+    def is_awake(self):
+        """Wake-mode gate. Always-on when WAKE is off — and when the input
+        stream is down, because a dark board that no button can wake is
+        worse than a lit one."""
+        if not self.wake_secs:
+            return True
+        if not self.input_stream_ok:
+            return True
+        return time.time() < self.awake_until
+
+    async def _go_dark(self):
+        """Drop our canvas so the firmware's own screen (usually the OFF
+        stub = dark) shows through."""
+        async with self.lock:
+            try:
+                await asyncio.to_thread(self.bar.clear)
+            except requests.RequestException:
+                pass
+            self.canvas_mode = None
+            self.dot_count = 0
+            self.blocked = False
 
     def displayed(self):
         # snapshot: the fetcher rebinds self.arrivals from the loop thread
@@ -2983,6 +3065,8 @@ class App:
         return result
 
     async def render(self):
+        if not self.is_awake():
+            return
         async with self.lock:
             try:
                 await asyncio.to_thread(self._push)
@@ -3266,6 +3350,10 @@ class App:
         was_soonest = shown is not None and self.index == 0
         self.arrivals = arrivals
         match = shown and self._same_train(shown, arrivals)
+        if not self.is_awake():
+            # asleep: keep the bookkeeping, skip every draw and flash
+            self.index = match if match is not None else 0
+            return
         if time.time() < self.page_hold_until:
             if match is not None:
                 self.index = match  # data stays fresh; page stays up
@@ -3321,6 +3409,12 @@ class App:
         while True:
             await asyncio.sleep(BLOCKED_RETRY_SECS if self.blocked
                                 else TICK_SECS)
+            if not self.is_awake():
+                if self.canvas_mode is not None:
+                    print(f"[{time.strftime('%H:%M:%S')}] wake window "
+                          "over — going dark")
+                    await self._go_dark()
+                continue
             if self.blocked:
                 # retried even with an empty board: a takeover plate must
                 # be re-asserted at the polite cadence too
@@ -3373,6 +3467,7 @@ class App:
             await asyncio.sleep(1)
             now = time.time()
             if (len(self.arrivals) > 1 and not self.blocked
+                    and self.is_awake()
                     and not self.lock.locked()
                     and now >= self.page_hold_until
                     and now >= self.rotate_hold_until
@@ -3417,6 +3512,63 @@ class App:
         self.dot_count = 0
         await self.render()
 
+    async def _handle_input_events(self, events):
+        """One status-WS frame's worth of physical input.
+
+        Wake mode: asleep, a dial turn or OK/START press WAKES the board
+        (only with the slider on OFF or unknown — elsewhere the buttons
+        drive the firmware UI and honoring them would fight it); the
+        waking input does nothing else. Awake, every interaction extends
+        the window, the buttons do their jobs, and BACK means lights out
+        now instead of redraw."""
+        if not events:
+            return
+        for kind, a, _b in events:
+            if kind == "switch":
+                self.switch_pos = a  # keep the slider position current
+        if self.wake_secs and not (time.time() < self.awake_until):
+            wants_wake = any(
+                (k == "encoder" and x)
+                or (k == "button" and x in (BTN_OK, BTN_START)
+                    and b == ACT_PRESS)
+                for k, x, b in events)
+            if wants_wake and self.switch_pos in (None, SWITCH_OFF_POS):
+                self.awake_until = time.time() + self.wake_secs
+                self.last_dial = time.time()
+                print(f"[{time.strftime('%H:%M:%S')}] wake — board on "
+                      f"for {self.wake_secs // 60}min")
+                self.canvas_mode = None  # fresh canvas after the dark gap
+                self.dot_count = 0
+                await self.render()
+            return  # the waking input only wakes; ignore the rest
+        if self.wake_secs:
+            self.awake_until = time.time() + self.wake_secs
+        # bursts batch many encoder events into one frame
+        moved = sum(x for k, x, _ in events if k == "encoder")
+        if moved and self.arrivals:
+            self.last_dial = time.time()
+            self.rotate_hold_until = 0.0
+            await self.slide_to(
+                (self.index + moved) % len(self.arrivals),
+                direction=1 if moved > 0 else -1)
+        for kind, a, b in events:
+            if kind == "button" and b == ACT_PRESS:
+                if a == BTN_OK:
+                    await self.on_ok()
+                elif a == BTN_START:
+                    await self.on_start()
+            elif kind == "button" and a == BTN_BACK and b == ACT_RELEASE:
+                if self.wake_secs:
+                    # BACK in wake mode = lights out now
+                    self.awake_until = 0.0
+                    print(f"[{time.strftime('%H:%M:%S')}] BACK — "
+                          "going dark")
+                    await self._go_dark()
+                else:
+                    await self.on_canvas_lost()
+            elif kind == "switch":
+                await self.on_canvas_lost()
+
     async def dial_listener(self):
         try:
             import websockets
@@ -3430,32 +3582,16 @@ class App:
                 async with websockets.connect(self.bar.t.ws_uri) as ws:
                     await ws.send(json.dumps({"enable": True}))
                     down_since = None
+                    self.input_stream_ok = True
                     print("dial connected — spin to scroll, OK for "
                           "alerts, START to snap home")
                     async for msg in ws:
                         if isinstance(msg, str):
                             continue
-                        events = input_events(msg)
-                        # bursts batch many encoder events into one frame
-                        moved = sum(d for k, d, _ in events
-                                    if k == "encoder")
-                        if moved and self.arrivals:
-                            self.last_dial = time.time()
-                            self.rotate_hold_until = 0.0
-                            await self.slide_to(
-                                (self.index + moved) % len(self.arrivals),
-                                direction=1 if moved > 0 else -1)
-                        for kind, a, b in events:
-                            if kind == "button" and b == ACT_PRESS:
-                                if a == BTN_OK:
-                                    await self.on_ok()
-                                elif a == BTN_START:
-                                    await self.on_start()
-                            elif kind == "switch" or (
-                                    kind == "button" and a == BTN_BACK
-                                    and b == ACT_RELEASE):
-                                await self.on_canvas_lost()
+                        await self._handle_input_events(input_events(msg))
+                self.input_stream_ok = False
             except Exception as e:
+                self.input_stream_ok = False
                 # log once per outage, not every 5s — retries used to be
                 # 74% of the manager's whole log buffer
                 if down_since is None:
@@ -3721,6 +3857,10 @@ def main():
                         help="minutes to reach each route's stop, e.g. "
                              "V:2,VE:4,NV:3 — buses departing sooner are "
                              "hidden (env WALK; 'off' shows everything)")
+    parser.add_argument("--wake", default=None,
+                        help="press-to-wake: minutes the board stays on "
+                             "after OK/START/dial, e.g. 15 or 15m or 900s "
+                             "(env WAKE; 'off' = always-on)")
     parser.add_argument("--rotate", default=None,
                         help="seconds per bus in the idle auto-rotation "
                              "through the next few catchable buses "
@@ -3821,12 +3961,32 @@ def main():
                 "or 'off'", "check ROTATE"))
             return
         rotate_secs = 0
+    wake_spec = args.wake or os.environ.get("WAKE") or WAKE_DEFAULT
+    wake_secs = parse_wake(wake_spec)
+    if wake_secs is None:
+        config_error_loop(bar, ConfigError(
+            f"WAKE {wake_spec!r} unparseable — expected minutes like 15, "
+            "15m, 900s, or 'off'", "check WAKE"))
+        return
+    if wake_secs and not bar.t.ws_uri:
+        print("WAKE needs the input stream (BUSYBAR_WS or USB); "
+              "running always-on", file=sys.stderr)
+        wake_secs = 0
     if walk:
         print("walk times: " + ", ".join(
             f"{d} {m}min" for d, m in sorted(walk.items())))
 
     app = App(bar, cfg, assets, status_assets, schedule,
-              walk=walk, rotate_secs=rotate_secs)
+              walk=walk, rotate_secs=rotate_secs, wake_secs=wake_secs)
+    if wake_secs:
+        app.switch_pos = bar.switch_position()
+        pos_name = {0: "busy", 1: "custom", 2: "off", 3: "apps",
+                    4: "settings"}.get(app.switch_pos, "unknown")
+        print(f"WAKE mode: dark until OK/START/dial, then on for "
+              f"{wake_secs // 60}min (slider: {pos_name}"
+              + ("" if app.switch_pos is not None else
+                 " — no GET /input/switch on this firmware; wake "
+                 "accepted in any position") + ")")
     app.config_inputs = (routes_csv, stops_csv, direction,
                          os.environ.get("FALLBACK_ROUTES") or "",
                          os.environ.get("FALLBACK_STOPS") or "",

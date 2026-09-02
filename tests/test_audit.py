@@ -100,6 +100,8 @@ def _adopt_app(arrivals, index):
     a.arrivals = list(arrivals)
     a.index = index
     a.page_hold_until = 0.0
+    a.wake_secs = 0             # always-on for these tests
+    a.input_stream_ok = False
     a.flashed = []
     a.rendered = []
 
