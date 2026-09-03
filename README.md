@@ -27,7 +27,9 @@ lower Vairo Village (stop 506). Any routes/stops work via env.
   alone (on firmware with `GET /input/switch` the app checks the slider
   live; elsewhere wake presses are accepted anywhere). If the input
   stream is down the board runs always-on, so it can never become
-  unwakeable. Default `off` = always-on.
+  unwakeable — but overnight, with no bus on the ~99-minute schedule
+  horizon and nothing to report, it stays dark either way and relights
+  by itself before the first morning bus. Default `off` = always-on.
 - **Idle auto-rotation**: with the dial untouched, the board tours the
   next few catchable buses (`ROTATE` seconds each, default 7, over the
   first `ROTATE_DEPTH`, default 3) and wraps back to the soonest. Any

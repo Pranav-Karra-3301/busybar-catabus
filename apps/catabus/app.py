@@ -50,7 +50,11 @@ in busybar-manager, put these in a variation's "Environment variables"):
                 slider on OFF (or unknown) only — elsewhere the buttons
                 belong to the firmware UI. Needs the input stream
                 (BUSYBAR_WS or USB); while the stream is down the board
-                runs always-on so it can never become unwakeable. On
+                runs always-on so it can never become unwakeable — but
+                only while buses are on the ~99-minute horizon (or a
+                suspension/planned takeover has something to say):
+                overnight an empty board stays dark either way, and
+                relights on its own before the first morning bus. On
                 firmware with GET /input/switch (api >= 27.7) the slider
                 position is read live at startup. Default off.
 
@@ -2890,13 +2894,19 @@ class App:
     # -- rendering ---------------------------------------------------------
 
     def is_awake(self):
-        """Wake-mode gate. Always-on when WAKE is off — and when the input
-        stream is down, because a dark board that no button can wake is
-        worse than a lit one."""
+        """Wake-mode gate. Always-on when WAKE is off. When the input
+        stream is down the board degrades to always-on so it can never
+        become unwakeable — but only while there is something worth
+        lighting: with no bus on the horizon (service done for the night)
+        and no disruption story to tell, dark is correct. Arrivals
+        reappear ~99 minutes before the first morning bus (the schedule
+        merge horizon), which relights a degraded board in time."""
         if not self.wake_secs:
             return True
         if not self.input_stream_ok:
-            return True
+            return bool(self.arrivals or self.raw_arrivals
+                        or (self.status_assets
+                            and self._alert("suspension", "planned")))
         return time.time() < self.awake_until
 
     async def _go_dark(self):

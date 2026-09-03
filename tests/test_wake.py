@@ -38,6 +38,9 @@ def wake_app(wake_secs=900, awake=False, switch_pos=app.SWITCH_OFF_POS):
     a.rotate_hold_until = 0.0
     a.canvas_mode = "card"
     a.dot_count = 2
+    a.raw_arrivals = list(a.arrivals)
+    a.status_assets = {}
+    a.alerts = []
     a.calls = []
 
     async def render():
@@ -76,11 +79,36 @@ def test_is_awake_gates():
     assert a.is_awake()                     # always-on
     a = wake_app(awake=False)
     a.input_stream_ok = False
-    assert a.is_awake()                     # stream down -> degrade lit
+    assert a.is_awake()                     # stream down + buses -> lit
     a.input_stream_ok = True
     assert not a.is_awake()                 # asleep
     a.awake_until = time.time() + 10
     assert a.is_awake()                     # inside the window
+
+
+def test_overnight_stays_dark_even_degraded():
+    # service done for the night: nothing on the ~99-minute horizon, so a
+    # dead input stream must NOT light the quiet plate until morning
+    a = wake_app(awake=False)
+    a.input_stream_ok = False
+    a.arrivals = []
+    a.raw_arrivals = []
+    assert not a.is_awake()
+    # ~99 min before the first morning bus, scheduled arrivals reappear
+    a.raw_arrivals = [(time.time() + 5400, "V", "t9", 0, False, False)]
+    a.arrivals = list(a.raw_arrivals)
+    assert a.is_awake()
+
+
+def test_daytime_suspension_still_lights_degraded_board():
+    a = wake_app(awake=False)
+    a.input_stream_ok = False
+    a.arrivals = []
+    a.raw_arrivals = []
+    a.status_assets = {"susp": {}}
+    a.alerts = [{"kind": "suspension", "type": "suspension",
+                 "head": "V not running", "period": "", "routes": ["V"]}]
+    assert a.is_awake()                     # the NO BUSES story is worth showing
 
 
 def test_ok_press_wakes_from_off_and_only_wakes():
