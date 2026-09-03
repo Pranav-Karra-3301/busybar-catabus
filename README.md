@@ -20,16 +20,14 @@ lower Vairo Village (stop 506). Any routes/stops work via env.
   stops). A bus departing sooner than its walk is hidden — and the moment
   the shown bus crosses that line, its departure flash plays: gone is
   gone, whether it left the stop or just left *you* behind.
-- **Press-to-wake** (`WAKE=15m`): the board stays dark until you press
-  OK/START or turn the dial, shows for 15 minutes after the last
-  interaction, then goes dark again; BACK turns it off early. Designed
-  for the OFF slider position, where the firmware leaves the buttons
-  alone (on firmware with `GET /input/switch` the app checks the slider
-  live; elsewhere wake presses are accepted anywhere). If the input
-  stream is down the board runs always-on, so it can never become
-  unwakeable — but overnight, with no bus on the ~99-minute schedule
-  horizon and nothing to report, it stays dark either way and relights
-  by itself before the first morning bus. Default `off` = always-on.
+- **Press-to-wake** (`WAKE=10m`): the board never lights without a
+  gesture — press OK/START, turn the dial, or flick the slider out of
+  OFF and back (the flick works with no forwarder at all: while the
+  input stream is down the app polls `GET /input/switch` over the cloud,
+  firmware api >= 27.7). It shows for the window after the last
+  interaction, then goes dark; BACK turns it off early. Dark doubles as
+  the away state: nobody home, nobody gestures, nothing shows — at any
+  hour. Default `off` = always-on.
 - **Idle auto-rotation**: with the dial untouched, the board tours the
   next few catchable buses (`ROTATE` seconds each, default 7, over the
   first `ROTATE_DEPTH`, default 3) and wraps back to the soonest. Any

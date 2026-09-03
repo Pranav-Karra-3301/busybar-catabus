@@ -44,19 +44,17 @@ in busybar-manager, put these in a variation's "Environment variables"):
                 the board then sits on the soonest bus, dial-only)
     ROTATE_DEPTH  how many buses the rotation tours (default 3)
     WAKE        press-to-wake: "15"/"15m" minutes or "900s" seconds. The
-                board stays DARK until OK/START/dial, shows for that long
-                after the last interaction, then goes dark again; BACK
-                turns it off early. Wake presses are honored with the
-                slider on OFF (or unknown) only — elsewhere the buttons
-                belong to the firmware UI. Needs the input stream
-                (BUSYBAR_WS or USB); while the stream is down the board
-                runs always-on so it can never become unwakeable — but
-                only while buses are on the ~99-minute horizon (or a
-                suspension/planned takeover has something to say):
-                overnight an empty board stays dark either way, and
-                relights on its own before the first morning bus. On
-                firmware with GET /input/switch (api >= 27.7) the slider
-                position is read live at startup. Default off.
+                board NEVER lights without a gesture: OK/START/dial (via
+                the input stream) or flicking the slider out of OFF and
+                back (tracked live from SwitchEvents, and polled over the
+                cloud every 10s while the stream is down — so the board
+                stays wakeable with no forwarder at all, given firmware
+                with GET /input/switch, api >= 27.7). It shows for the
+                window after the last interaction, then goes dark; BACK
+                turns it off early. Dark doubles as the away state:
+                nobody home, nobody gestures, nothing shows. Button
+                wakes honored with the slider on OFF/unknown only.
+                Default off = always-on.
 
     CATA_GTFS_URL   static GTFS zip override
     CATA_RT_BASE    GTFS-realtime base override (…&FeedType= is appended)
@@ -2030,8 +2028,8 @@ class Bar:
         names = {"busy": 0, "custom": 1, "off": 2, "apps": 3,
                  "settings": 4}
         try:
-            r = self.s.get(self.t.url("/input/switch"),
-                           headers=self.t.headers, timeout=8)
+            r = requests.get(self.t.url("/input/switch"),
+                             headers=self.t.headers, timeout=8)
             if r.ok:
                 return names.get(r.json().get("position"))
         except (requests.RequestException, ValueError):
@@ -2894,20 +2892,48 @@ class App:
     # -- rendering ---------------------------------------------------------
 
     def is_awake(self):
-        """Wake-mode gate. Always-on when WAKE is off. When the input
-        stream is down the board degrades to always-on so it can never
-        become unwakeable — but only while there is something worth
-        lighting: with no bus on the horizon (service done for the night)
-        and no disruption story to tell, dark is correct. Arrivals
-        reappear ~99 minutes before the first morning bus (the schedule
-        merge horizon), which relights a degraded board in time."""
+        """Wake-mode gate: the board NEVER lights without a wake gesture.
+        Dark doubles as the away state — when nobody is home, nobody
+        gestures, nothing shows. (The old stream-down degrade that lit
+        the board whenever the forwarder was unreachable is gone; the
+        cloud slider poll keeps a wake path alive with no Mac at all.)"""
         if not self.wake_secs:
             return True
-        if not self.input_stream_ok:
-            return bool(self.arrivals or self.raw_arrivals
-                        or (self.status_assets
-                            and self._alert("suspension", "planned")))
         return time.time() < self.awake_until
+
+    async def _note_switch(self, pos):
+        """Track the slider. A transition INTO the OFF position while
+        asleep is a wake gesture — flick the slider away and back. This
+        is the Mac-free wake path: it works from live SwitchEvents AND
+        from the cloud switch poll. Returns True when it woke the board."""
+        prev, self.switch_pos = self.switch_pos, pos
+        if (self.wake_secs and pos == SWITCH_OFF_POS
+                and prev is not None and prev != SWITCH_OFF_POS
+                and not (time.time() < self.awake_until)):
+            self.awake_until = time.time() + self.wake_secs
+            self.last_dial = time.time()
+            print(f"[{time.strftime('%H:%M:%S')}] slider wake — board on "
+                  f"for {self.wake_secs // 60}min")
+            self.canvas_mode = None
+            self.dot_count = 0
+            await self.render()
+            return True
+        return False
+
+    async def switch_poller(self):
+        """While asleep with the input stream down, poll the slider over
+        the cloud (GET /input/switch, api >= 27.7) so the board stays
+        wakeable with no forwarder: flick the slider out of OFF and back.
+        Idle when the stream is up (SwitchEvents cover it) or while
+        awake."""
+        while True:
+            await asyncio.sleep(10)
+            if (not self.wake_secs or self.input_stream_ok
+                    or time.time() < self.awake_until):
+                continue
+            pos = await asyncio.to_thread(self.bar.switch_position)
+            if pos is not None:
+                await self._note_switch(pos)
 
     async def _go_dark(self):
         """Drop our canvas so the firmware's own screen (usually the OFF
@@ -3533,9 +3559,12 @@ class App:
         now instead of redraw."""
         if not events:
             return
+        woke = False
         for kind, a, _b in events:
             if kind == "switch":
-                self.switch_pos = a  # keep the slider position current
+                woke = await self._note_switch(a) or woke
+        if woke:
+            return  # the waking flick only wakes
         if self.wake_secs and not (time.time() < self.awake_until):
             wants_wake = any(
                 (k == "encoder" and x)
@@ -3644,6 +3673,8 @@ class App:
             tasks.append(self._forever("rotator", self.rotator))
         elif self.bar.t.ws_uri:
             tasks.append(self._forever("idle", self.idle_reset))
+        if self.wake_secs:
+            tasks.append(self._forever("switchpoll", self.switch_poller))
         await asyncio.gather(*tasks)
 
     async def schedule_reloader(self):
@@ -3978,9 +4009,10 @@ def main():
             f"WAKE {wake_spec!r} unparseable — expected minutes like 15, "
             "15m, 900s, or 'off'", "check WAKE"))
         return
-    if wake_secs and not bar.t.ws_uri:
-        print("WAKE needs the input stream (BUSYBAR_WS or USB); "
-              "running always-on", file=sys.stderr)
+    wake_pos = bar.switch_position() if wake_secs else None
+    if wake_secs and not bar.t.ws_uri and wake_pos is None:
+        print("WAKE needs the input stream or GET /input/switch "
+              "(api >= 27.7); running always-on", file=sys.stderr)
         wake_secs = 0
     if walk:
         print("walk times: " + ", ".join(
@@ -3989,14 +4021,12 @@ def main():
     app = App(bar, cfg, assets, status_assets, schedule,
               walk=walk, rotate_secs=rotate_secs, wake_secs=wake_secs)
     if wake_secs:
-        app.switch_pos = bar.switch_position()
+        app.switch_pos = wake_pos
         pos_name = {0: "busy", 1: "custom", 2: "off", 3: "apps",
-                    4: "settings"}.get(app.switch_pos, "unknown")
-        print(f"WAKE mode: dark until OK/START/dial, then on for "
-              f"{wake_secs // 60}min (slider: {pos_name}"
-              + ("" if app.switch_pos is not None else
-                 " — no GET /input/switch on this firmware; wake "
-                 "accepted in any position") + ")")
+                    4: "settings"}.get(wake_pos, "unknown")
+        print(f"WAKE mode: dark until OK/START/dial or a slider flick "
+              f"back to OFF, then on for {wake_secs // 60}min "
+              f"(slider: {pos_name})")
     app.config_inputs = (routes_csv, stops_csv, direction,
                          os.environ.get("FALLBACK_ROUTES") or "",
                          os.environ.get("FALLBACK_STOPS") or "",

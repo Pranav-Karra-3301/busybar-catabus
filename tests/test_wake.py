@@ -74,41 +74,42 @@ def handle(a, *events):
     asyncio.run(a._handle_input_events(list(events)))
 
 
-def test_is_awake_gates():
+def test_is_awake_gates_are_strict():
     a = wake_app(wake_secs=0)
     assert a.is_awake()                     # always-on
     a = wake_app(awake=False)
-    a.input_stream_ok = False
-    assert a.is_awake()                     # stream down + buses -> lit
-    a.input_stream_ok = True
     assert not a.is_awake()                 # asleep
+    a.input_stream_ok = False
+    assert not a.is_awake()                 # stream down does NOT light it
     a.awake_until = time.time() + 10
     assert a.is_awake()                     # inside the window
 
 
-def test_overnight_stays_dark_even_degraded():
-    # service done for the night: nothing on the ~99-minute horizon, so a
-    # dead input stream must NOT light the quiet plate until morning
-    a = wake_app(awake=False)
-    a.input_stream_ok = False
-    a.arrivals = []
-    a.raw_arrivals = []
-    assert not a.is_awake()
-    # ~99 min before the first morning bus, scheduled arrivals reappear
-    a.raw_arrivals = [(time.time() + 5400, "V", "t9", 0, False, False)]
-    a.arrivals = list(a.raw_arrivals)
-    assert a.is_awake()
+def test_slider_flick_back_to_off_wakes():
+    a = wake_app(awake=False, switch_pos=0)  # slider sitting on BUSY
+    handle(a, ("switch", app.SWITCH_OFF_POS, None))
+    assert a.awake_until > time.time()
+    assert a.calls == ["render"]
+    assert a.switch_pos == app.SWITCH_OFF_POS
 
 
-def test_daytime_suspension_still_lights_degraded_board():
-    a = wake_app(awake=False)
-    a.input_stream_ok = False
-    a.arrivals = []
-    a.raw_arrivals = []
-    a.status_assets = {"susp": {}}
-    a.alerts = [{"kind": "suspension", "type": "suspension",
-                 "head": "V not running", "period": "", "routes": ["V"]}]
-    assert a.is_awake()                     # the NO BUSES story is worth showing
+def test_first_observation_and_off_to_off_do_not_wake():
+    a = wake_app(awake=False, switch_pos=None)
+    handle(a, ("switch", app.SWITCH_OFF_POS, None))   # first sighting
+    assert a.awake_until == 0.0
+    handle(a, ("switch", app.SWITCH_OFF_POS, None))   # off -> off
+    assert a.awake_until == 0.0
+    handle(a, ("switch", 0, None))                    # leaving OFF
+    assert a.awake_until == 0.0
+    assert a.calls == []
+
+
+def test_flick_into_off_while_awake_extends_not_rewakes():
+    a = wake_app(awake=True, switch_pos=0)
+    before = a.awake_until
+    handle(a, ("switch", app.SWITCH_OFF_POS, None))
+    assert a.awake_until >= before          # interaction extends the window
+    assert a.calls == ["lost"]              # canvas-lost redraw, no wake render
 
 
 def test_ok_press_wakes_from_off_and_only_wakes():
